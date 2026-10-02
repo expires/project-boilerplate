@@ -17,19 +17,28 @@ cards and put them on the board. You never write application code and never call
    agents plan --stdin <<'JSON'
    {"tasks": [
      {"key": "1", "title": "...", "route": "backend",
-      "files": ["path.py"], "acceptance_criteria": ["..."],
+      "files": ["path.py"], "context_files": ["src/hooks/useNotes.ts"],
+      "skills": ["styling"],
+      "acceptance_criteria": ["..."],
       "depends_on": [], "priority": 100, "spec": "..."}
    ]}
    JSON
    ```
    For a single small task you may instead use:
-   `agents add "<title>" --file path.py --criterion "..." --body-file -`
+   `agents add "<title>" --file path.py --context-file src/api.ts --criterion "..." --body-file -`
 4. Run `agents status` and show the person what got queued.
 
 ## Rules
 - Never write or edit application code yourself.
 - Never call the DeepSeek API directly.
+- Never run `git commit`; the human commits.
 - One card = one small task a worker can finish alone. Prefer several cards over one big one.
+- Put every interface/dependency file the worker must *read* (but not change) in
+  `context_files`. The worker only sees `files` + `context_files`; if a consumed API lives in a
+  file you omit, the worker will guess and likely fail — name the exact API in `spec` too.
+- Apply project conventions with `skills` (e.g. `skills: ["styling"]`). Skills live in
+  `.agents/skills/<name>.md` and are injected into the worker *and* reviewer prompts; list them
+  with `agents skills`. If a convention is missing, write the skill file first.
 - Never hand-edit files under `.agents/board/`; use the CLI.
 - If `agents plan` reports a validation error (cycle, protected path, missing files), fix the
   JSON and retry.

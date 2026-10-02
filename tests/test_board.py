@@ -30,6 +30,8 @@ class BoardTests(unittest.TestCase):
         self.assertIn("AI_ECONOMY_API_KEY=", (self.root / ".env").read_text())
         self.assertTrue((self.root / ".gitignore").is_file())
         self.assertIn(".agents/worktrees/", (self.root / ".gitignore").read_text())
+        self.assertTrue((self.root / ".gitattributes").is_file())
+        self.assertIn("package-lock.json -diff", (self.root / ".gitattributes").read_text())
 
     def test_gitignore_appended_and_idempotent(self):
         path = self.root / ".gitignore"
@@ -38,6 +40,16 @@ class BoardTests(unittest.TestCase):
         text = path.read_text()
         self.assertIn("custom-ignore\n", text)
         self.assertIn(".agents/worktrees/", text)
+        config.scaffold(self.root)
+        self.assertEqual(path.read_text(), text)
+
+    def test_gitattributes_appended_and_idempotent(self):
+        path = self.root / ".gitattributes"
+        path.write_text("*.txt text\n")
+        config.scaffold(self.root)
+        text = path.read_text()
+        self.assertIn("*.txt text", text)
+        self.assertIn("package-lock.json -diff", text)
         config.scaffold(self.root)
         self.assertEqual(path.read_text(), text)
 

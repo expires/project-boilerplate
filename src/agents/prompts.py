@@ -49,8 +49,14 @@ __CRITERIA__
 Files you may change:
 __FILES__
 
+Read-only context files (do NOT modify these):
+__CONTEXT_FILES__
+
 Existing file contents:
 __CONTEXT__
+
+Project skills (binding conventions — follow them):
+__SKILLS__
 
 Reviewer feedback to address (if any):
 __FEEDBACK__
@@ -77,6 +83,9 @@ __CRITERIA__
 
 Diff (base...task):
 __DIFF__
+
+Project skills (binding conventions — request changes if the patch violates them):
+__SKILLS__
 
 This is review cycle __CYCLE__ of __MAX_CYCLES__.
 Return your verdict as JSON."""

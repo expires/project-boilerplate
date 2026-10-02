@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import signal
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -65,17 +64,33 @@ def start_detached(
             command += ["--concurrency", str(concurrency)]
     with log_path.open("a") as log:
         log.write(f"--- runner start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n")
-        log.flush()
-        process = subprocess.Popen(
-            command,
-            cwd=str(root),
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    pid_path.write_text(str(process.pid))
-    return process.pid
+    pid = _spawn(command, str(root), log_path)
+    pid_path.write_text(str(pid))
+    return pid
+
+
+def _spawn(command: list[str], cwd: str, log_path: Path) -> int:
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        os.close(devnull)
+        os.close(log_fd)
+        raise BoardError(f"could not start runner: {exc}") from exc
+    if pid == 0:
+        try:
+            os.setsid()
+            os.chdir(cwd)
+            os.dup2(devnull, 0)
+            os.dup2(log_fd, 1)
+            os.dup2(log_fd, 2)
+            os.execvp(command[0], command)
+        except BaseException:
+            os._exit(127)
+    os.close(devnull)
+    os.close(log_fd)
+    return pid
 
 
 def stop(root: Path | str, timeout: float = 5.0) -> bool:

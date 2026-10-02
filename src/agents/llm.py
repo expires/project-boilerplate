@@ -14,6 +14,11 @@ from .board import AGENTS_DIRNAME, BoardError, log
 CALLS_THIS_RUN = 0
 
 
+def reset_call_counter() -> None:
+    global CALLS_THIS_RUN
+    CALLS_THIS_RUN = 0
+
+
 def load_dotenv(path: Path) -> None:
     if not path.is_file():
         return
@@ -118,9 +123,10 @@ def call_llm(
     if dry_run:
         log(f"[dry-run] role={role} model={route_info['model'] or 'unset'}")
         return '{"dry_run": true}'
-    max_calls = int(config.get("cost_controls", {}).get("max_llm_calls_per_run", 12))
+    controls = config.get("cost_controls", {})
+    max_calls = int(controls.get("max_llm_calls_per_tick", controls.get("max_llm_calls_per_run", 60)))
     if CALLS_THIS_RUN >= max_calls:
-        raise BoardError(f"max_llm_calls_per_run reached ({max_calls})")
+        raise BoardError(f"max_llm_calls_per_tick reached ({max_calls})")
     if not route_info["base_url"] or not route_info["api_key"] or not route_info["model"]:
         raise BoardError(
             f"role '{role}' endpoint not configured: set "

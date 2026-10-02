@@ -9,9 +9,10 @@ from . import __version__, roles, runner
 from .board import AGENTS_DIRNAME, COLUMNS, Board, BoardError, card_as_dict, find_project_root
 from .config import load_config, scaffold
 from .llm import load_dotenv, load_usage
-from .logs import read_log
+from .logs import log_event, read_log
 from .orchestrator import Orchestrator
 from .skill import install_skill
+from .skills import available_skills, validate_skills
 
 
 def _resolve_root(args: argparse.Namespace) -> Path:
@@ -65,11 +66,13 @@ def _read_text(value: str | None) -> str:
 
 
 def cmd_add(args: argparse.Namespace) -> int:
-    board = Board(_resolve_root(args))
+    root = _resolve_root(args)
+    board = Board(root)
     body = _read_text(args.body_file).strip() if args.body_file else ""
     spec = body or args.text
     for dep in args.depends_on or []:
         board.find(dep)
+    validate_skills(root, list(args.skill or []))
     card = board.create(
         args.text,
         body=spec,
@@ -77,6 +80,8 @@ def cmd_add(args: argparse.Namespace) -> int:
         route=args.route or "backend",
         priority=args.priority if args.priority is not None else 100,
         files_hint=list(args.file or []),
+        context_files=list(args.context_file or []),
+        skills=list(args.skill or []),
         acceptance_criteria=list(args.criterion or []),
         depends_on=list(args.depends_on or []),
     )
@@ -97,6 +102,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     planned = roles.validate_planned_tasks(config, tasks)
     keys = {task["key"] for task in planned}
     for task in planned:
+        validate_skills(root, task.get("skills", []))
         for dep in task["depends_on"]:
             if dep not in keys:
                 board.find(dep)
@@ -109,6 +115,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
             route=task["route"],
             priority=task["priority"],
             files_hint=task["files"],
+            context_files=task.get("context_files", []),
+            skills=task.get("skills", []),
             acceptance_criteria=task["acceptance_criteria"],
         )
         id_by_key[task["key"]] = card.id
@@ -205,23 +213,52 @@ def cmd_logs(args: argparse.Namespace) -> int:
     return 0
 
 
-def _reopen(args: argparse.Namespace, reset_review: bool) -> int:
+def cmd_retry(args: argparse.Namespace) -> int:
     board = Board(_resolve_root(args))
-    fields = {"attempts": 0, "blocking_issues": [], "last_review_summary": ""}
-    if reset_review:
-        fields["review_cycles"] = 0
-    board.update(args.card_id, **fields)
-    card = board.move(args.card_id, "not_started", note="manually reopened")
+    board.update(args.card_id, attempts=0, blocking_issues=[], last_review_summary="")
+    card = board.move(args.card_id, "not_started", note="manually reopened for rework")
     print(f"{card.id} -> {card.status}")
     return 0
 
 
-def cmd_retry(args: argparse.Namespace) -> int:
-    return _reopen(args, reset_review=False)
-
-
 def cmd_unblock(args: argparse.Namespace) -> int:
-    return _reopen(args, reset_review=True)
+    board = Board(_resolve_root(args))
+    card = board.find(args.card_id)
+    board.update(args.card_id, attempts=0, review_cycles=0, blocking_issues=[], last_review_summary="")
+    target = "review" if card.branch else "not_started"
+    note = "manually reopened for re-review" if target == "review" else "manually reopened"
+    card = board.move(args.card_id, target, note=note)
+    print(f"{card.id} -> {card.status}")
+    return 0
+
+
+def cmd_re_review(args: argparse.Namespace) -> int:
+    return cmd_unblock(args)
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    root = _resolve_root(args)
+    names = available_skills(root)
+    if args.json:
+        print(json.dumps(names))
+        return 0
+    if not names:
+        print("no skills in .agents/skills/")
+        return 0
+    for name in names:
+        print(name)
+    return 0
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    root = _resolve_root(args)
+    board = Board(root)
+    card = board.find(args.card_id)
+    if args.reason:
+        log_event(root, card.id, f"cancelled: {args.reason}")
+    board.delete(args.card_id)
+    print(f"cancelled {card.id}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -238,6 +275,8 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("text", help="task title")
     add.add_argument("--body-file", help="file with the task spec, or - for stdin")
     add.add_argument("--file", action="append", help="file the task may change (repeatable)")
+    add.add_argument("--context-file", action="append", help="read-only context file (repeatable)")
+    add.add_argument("--skill", action="append", help="project skill to apply (repeatable)")
     add.add_argument("--criterion", action="append", help="acceptance criterion (repeatable)")
     add.add_argument("--depends-on", action="append", help="existing card id dependency (repeatable)")
     add.add_argument("--route", default="", help="routing label (default backend)")
@@ -281,9 +320,22 @@ def build_parser() -> argparse.ArgumentParser:
     retry.add_argument("card_id")
     retry.set_defaults(func=cmd_retry)
 
-    unblock = sub.add_parser("unblock", help="reopen a blocked card and reset review cycles")
+    unblock = sub.add_parser("unblock", help="reopen a card (re-review if it has a branch, else rework)")
     unblock.add_argument("card_id")
     unblock.set_defaults(func=cmd_unblock)
+
+    re_review = sub.add_parser("re-review", help="send an existing card back to the reviewer")
+    re_review.add_argument("card_id")
+    re_review.set_defaults(func=cmd_re_review)
+
+    cancel = sub.add_parser("cancel", help="remove a superseded or duplicate card from the board")
+    cancel.add_argument("card_id")
+    cancel.add_argument("--reason", default="")
+    cancel.set_defaults(func=cmd_cancel)
+
+    skills = sub.add_parser("skills", help="list project skills in .agents/skills/")
+    skills.add_argument("--json", action="store_true")
+    skills.set_defaults(func=cmd_skills)
 
     skill = sub.add_parser("install-skill", help="install the Architect skill for Claude Code")
     skill.add_argument("--project", action="store_true", help="install into the project instead of the user dir")

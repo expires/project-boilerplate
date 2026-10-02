@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agents import config, vcs
-from agents.board import Board
+from agents.board import Board, BoardError
 from agents.cli import main
 from agents.skill import install_skill
 
@@ -46,6 +46,49 @@ class CliTests(unittest.TestCase):
         self.assertEqual(card.acceptance_criteria, ["greet works"])
         self.assertEqual(card.priority, 2)
 
+    def _write_skill(self, name, text="rule"):
+        directory = self.root / ".agents" / "skills"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{name}.md").write_text(text + "\n")
+
+    def test_add_with_skill(self):
+        self._write_skill("styling")
+        _, out, _ = self.run_cli("add", "Styled", "--skill", "styling")
+        self.assertEqual(Board(self.root).find(out.strip()).skills, ["styling"])
+
+    def test_add_unknown_skill_fails(self):
+        code, _, err = self.run_cli("add", "X", "--skill", "nope")
+        self.assertEqual(code, 1)
+        self.assertIn("unknown skill", err)
+
+    def test_skills_command_lists(self):
+        self._write_skill("styling")
+        code, out, _ = self.run_cli("skills")
+        self.assertEqual(code, 0)
+        self.assertIn("styling", out)
+
+    def test_plan_with_skill(self):
+        self._write_skill("styling")
+        payload = {"tasks": [{"key": "1", "title": "S", "files": ["a.ts"], "skills": ["styling"]}]}
+        code, out, _ = self.run_cli("plan", "--stdin", stdin=json.dumps(payload))
+        self.assertEqual(code, 0)
+        card_id = json.loads(out)["created"][0]
+        self.assertEqual(Board(self.root).find(card_id).skills, ["styling"])
+
+    def test_add_context_file(self):
+        _, out, _ = self.run_cli("add", "Task", "--context-file", "src/api.ts")
+        card = Board(self.root).find(out.strip())
+        self.assertEqual(card.context_files, ["src/api.ts"])
+
+    def test_cancel_removes_card(self):
+        _, out, _ = self.run_cli("add", "Doomed")
+        card_id = out.strip()
+        Board(self.root).move(card_id, "blocked")
+        code, _, _ = self.run_cli("cancel", card_id, "--reason", "duplicate")
+        self.assertEqual(code, 0)
+        with self.assertRaises(BoardError):
+            Board(self.root).find(card_id)
+
     def test_add_unknown_dependency_fails(self):
         code, _, err = self.run_cli("add", "Child", "--depends-on", "T-999")
         self.assertEqual(code, 1)
@@ -59,6 +102,7 @@ class CliTests(unittest.TestCase):
                     "key": "2",
                     "title": "Second",
                     "files": ["b.py"],
+                    "context_files": ["src/api.ts"],
                     "depends_on": ["1"],
                     "priority": 5,
                     "spec": "do b",
@@ -71,6 +115,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(created, ["T-001", "T-002"])
         board = Board(self.root)
         self.assertEqual(board.find("T-002").depends_on, ["T-001"])
+        self.assertEqual(board.find("T-002").context_files, ["src/api.ts"])
         self.assertEqual(board.find("T-002").spec, "do b")
 
     def test_plan_depends_on_existing_card(self):
@@ -99,6 +144,33 @@ class CliTests(unittest.TestCase):
         code, _, err = self.run_cli("plan", "--stdin", stdin=json.dumps(payload))
         self.assertEqual(code, 1)
         self.assertIn("protected", err)
+
+    def test_retry_reopens_for_rework(self):
+        _, out, _ = self.run_cli("add", "Task")
+        card_id = out.strip()
+        board = Board(self.root)
+        board.move(card_id, "blocked")
+        code, _, _ = self.run_cli("retry", card_id)
+        self.assertEqual(code, 0)
+        self.assertEqual(board.find(card_id).status, "not_started")
+
+    def test_re_review_with_branch(self):
+        _, out, _ = self.run_cli("add", "Task")
+        card_id = out.strip()
+        board = Board(self.root)
+        board.update(card_id, branch="agent/t-001")
+        board.move(card_id, "blocked")
+        code, _, _ = self.run_cli("re-review", card_id)
+        self.assertEqual(code, 0)
+        self.assertEqual(board.find(card_id).status, "review")
+
+    def test_unblock_without_branch_reopens(self):
+        _, out, _ = self.run_cli("add", "Task")
+        card_id = out.strip()
+        board = Board(self.root)
+        board.move(card_id, "blocked")
+        self.run_cli("unblock", card_id)
+        self.assertEqual(board.find(card_id).status, "not_started")
 
     def test_status_json_shape(self):
         code, out, _ = self.run_cli("status", "--json")

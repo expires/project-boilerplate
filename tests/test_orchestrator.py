@@ -36,9 +36,11 @@ class FakeLLM:
         self.worker = worker
         self.reviewer = reviewer
         self.roles = []
+        self.users = []
 
     def __call__(self, config_dict, root, role, system, user):
         self.roles.append(role)
+        self.users.append((role, user))
         if role == "pm":
             return self.pm(config_dict, root, user) if callable(self.pm) else self.pm
         if role == "worker":
@@ -106,6 +108,26 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("worker", llm.roles)
         self.assertIn("reviewer", llm.roles)
 
+    def test_lockfile_diffs_are_collapsed(self):
+        lock = self.root / "package-lock.json"
+        lock.write_text("\n".join(f"line {i}" for i in range(500)) + "\n")
+        vcs.commit_all(self.root, "lock v1")
+        vcs.git(self.root, "checkout", "-b", "feature")
+        lock.write_text("\n".join(f"other {i}" for i in range(500)) + "\n")
+        vcs.commit_all(self.root, "lock v2")
+        diff = vcs.diff(self.root, "main", "feature")
+        vcs.git(self.root, "checkout", "main")
+        self.assertIn("package-lock.json", diff)
+        self.assertLess(len(diff.splitlines()), 20)
+
+    def test_tick_resets_call_counter(self):
+        from agents import llm
+
+        llm.CALLS_THIS_RUN = 999
+        orch = self.orchestrator(FakeLLM(pm="{}", worker="{}", reviewer=approve_response()), decompose=False)
+        orch.tick()
+        self.assertEqual(llm.CALLS_THIS_RUN, 0)
+
     def test_requires_first_commit(self):
         empty = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(empty, ignore_errors=True))
@@ -153,6 +175,32 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(card.review_cycles, 1)
         self.assertEqual(card.attempts, 2)
         self.assertIn("version 2", (self.root / "hello.py").read_text())
+
+    def test_skills_injected_into_prompts(self):
+        skills = self.root / ".agents" / "skills"
+        skills.mkdir(parents=True, exist_ok=True)
+        (skills / "styling.md").write_text("Always use 1px borders.")
+        Board(self.root).create("Style it", files_hint=["src/app.ts"], skills=["styling"])
+        llm = FakeLLM(
+            pm="{}",
+            worker=json.dumps({"summary": "x", "files": [{"path": "src/app.ts", "content": "// ok\n"}]}),
+            reviewer=approve_response(),
+        )
+        self.orchestrator(llm, decompose=False).run(watch=False)
+        worker_prompts = [text for role, text in llm.users if role == "worker"]
+        reviewer_prompts = [text for role, text in llm.users if role == "reviewer"]
+        self.assertTrue(any("Always use 1px borders." in text for text in worker_prompts))
+        self.assertTrue(any("Always use 1px borders." in text for text in reviewer_prompts))
+
+    def test_context_file_write_rejected(self):
+        Board(self.root).create("Use the API", files_hint=["src/app.ts"], context_files=["src/api.ts"])
+        llm = FakeLLM(
+            pm="{}",
+            worker=json.dumps({"summary": "x", "files": [{"path": "src/api.ts", "content": "changed"}]}),
+            reviewer=approve_response(),
+        )
+        self.orchestrator(llm, decompose=False).run(watch=False)
+        self.assertEqual(Board(self.root).find("T-001").status, "blocked")
 
     def test_protected_path_blocks(self):
         self.write_spec()

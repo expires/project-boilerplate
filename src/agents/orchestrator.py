@@ -7,7 +7,9 @@ from typing import Any
 from . import roles, shell, vcs
 from .board import AGENTS_DIRNAME, Board, BoardError, Card, log
 from .config import load_config
+from .llm import reset_call_counter
 from .logs import log_event
+from .skills import load_skills
 from .validate import changed_line_count, is_protected, safe_path
 
 
@@ -84,7 +86,11 @@ class Orchestrator:
     def _context(self, card: Card, worktree: Path) -> str:
         limit = int(self.config.get("cost_controls", {}).get("max_input_chars", 48000)) // 2
         chunks: list[str] = []
-        for rel in card.files_hint:
+        seen: set[str] = set()
+        for rel in [*card.files_hint, *card.context_files]:
+            if rel in seen:
+                continue
+            seen.add(rel)
             try:
                 target = safe_path(worktree, rel)
             except BoardError:
@@ -95,6 +101,15 @@ class Orchestrator:
                 chunks.append(f"### {rel}\n(new file)")
         text = "\n\n".join(chunks)
         return text[:limit]
+
+    def _skills_text(self, card: Card) -> str:
+        names = list(
+            dict.fromkeys([*self.config.get("context", {}).get("always_skills", []), *card.skills])
+        )
+        if not names:
+            return ""
+        cap = int(self.config.get("cost_controls", {}).get("max_input_chars", 48000)) // 4
+        return load_skills(self.root, names, cap)
 
     def _feedback(self, card: Card) -> str:
         parts = [card.last_review_summary.strip()] if card.last_review_summary else []
@@ -114,6 +129,8 @@ class Orchestrator:
             if not isinstance(item, dict) or not item.get("path") or not isinstance(item.get("content"), str):
                 raise BoardError("each file needs a 'path' and string 'content'")
             relative = str(item["path"])
+            if relative in card.context_files and relative not in card.files_hint:
+                raise BoardError(f"worker attempted to modify read-only context file '{relative}'")
             if is_protected(self.config, relative):
                 raise BoardError(f"worker attempted to write protected path '{relative}'")
             target = safe_path(worktree, relative)
@@ -164,7 +181,12 @@ class Orchestrator:
             log_event(self.root, card.id, f"worker started on {branch}")
             vcs.worktree_add(self.root, worktree, branch, self.base)
             context = self._context(card, worktree)
-            payload = roles.worker_propose(self.config, self.root, card, context, self._feedback(card), self.llm)
+            skills_text = self._skills_text(card)
+            if skills_text:
+                log_event(self.root, card.id, f"skills applied: {', '.join(card.skills) or '(always)'}")
+            payload = roles.worker_propose(
+                self.config, self.root, card, context, self._feedback(card), skills_text, self.llm
+            )
             writes = self._validate_writes(card, payload.get("files"), worktree)
             for target, content in writes:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -191,9 +213,19 @@ class Orchestrator:
             return 1
         max_cycles = int(self.config["governance"].get("review_retries", 3))
         try:
+            stat = vcs.diff_stat(self.root, self.base, card.branch).strip()
             diff_text = vcs.diff(self.root, self.base, card.branch)
+            if stat:
+                diff_text = f"Changed files:\n{stat}\n\nPatch:\n{diff_text}"
             verdict = roles.reviewer_verdict(
-                self.config, self.root, card, diff_text, int(card.review_cycles) + 1, max_cycles, self.llm
+                self.config,
+                self.root,
+                card,
+                diff_text,
+                int(card.review_cycles) + 1,
+                max_cycles,
+                self._skills_text(card),
+                self.llm,
             )
         except BoardError as exc:
             log(f"{card.id} review failed: {exc}")
@@ -227,6 +259,7 @@ class Orchestrator:
         return 1
 
     def tick(self) -> int:
+        reset_call_counter()
         actions = self._requeue()
         actions += self._intake()
         actions += self._claim()

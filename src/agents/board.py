@@ -76,6 +76,8 @@ class Card:
     route: str = "worker"
     acceptance_criteria: list[str] = field(default_factory=list)
     files_hint: list[str] = field(default_factory=list)
+    context_files: list[str] = field(default_factory=list)
+    skills: list[str] = field(default_factory=list)
     depth: int = 1
     attempts: int = 0
     review_cycles: int = 0
@@ -99,6 +101,8 @@ class Card:
         "route",
         "acceptance_criteria",
         "files_hint",
+        "context_files",
+        "skills",
         "depth",
         "attempts",
         "review_cycles",
@@ -260,6 +264,15 @@ class Board:
             self._write(card, destination)
             if destination != path and path.exists():
                 path.unlink()
+            return card
+
+    def delete(self, card_id: str) -> Card:
+        with self.lock():
+            found = self._find(card_id)
+            if not found:
+                raise BoardError(f"card '{card_id}' not found")
+            card, path = found
+            path.unlink()
             return card
 
     def claim(self, card_id: str, lease_minutes: int = 45) -> Card:

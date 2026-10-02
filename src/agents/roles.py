@@ -49,6 +49,8 @@ def validate_planned_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str,
             raise BoardError(f"task '{key}' lists {len(files)} files; cap is {max_files}")
         criteria = [str(c) for c in (item.get("acceptance_criteria") or []) if str(c).strip()]
         depends = [str(d) for d in (item.get("depends_on") or []) if str(d).strip()]
+        context_files = [str(p) for p in (item.get("context_files") or []) if str(p).strip()]
+        skills = [str(s) for s in (item.get("skills") or []) if str(s).strip()]
         spec = str(item.get("spec") or item.get("body") or "").strip() or title
         try:
             priority = int(item.get("priority", 100))
@@ -60,6 +62,8 @@ def validate_planned_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str,
                 "title": title,
                 "route": str(item.get("route") or "backend"),
                 "files": files,
+                "context_files": context_files,
+                "skills": skills,
                 "acceptance_criteria": criteria,
                 "depends_on": depends,
                 "priority": priority,
@@ -70,9 +74,9 @@ def validate_planned_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str,
         for dep in task["depends_on"]:
             if dep not in keys and not re.fullmatch(r"T-\d+", dep):
                 raise BoardError(f"task '{task['key']}' depends on unknown '{dep}'")
-        for path in task["files"]:
+        for path in (*task["files"], *task["context_files"]):
             if is_protected(config, path):
-                raise BoardError(f"task '{task['key']}' targets protected path '{path}'")
+                raise BoardError(f"task '{task['key']}' references protected path '{path}'")
     _assert_acyclic(normalized)
     return normalized
 
@@ -123,10 +127,12 @@ def worker_propose(
     card: Card,
     context: str,
     feedback: str,
+    skills: str = "",
     llm: LLM | None = None,
 ) -> dict[str, Any]:
     criteria = "\n".join(f"- {item}" for item in card.acceptance_criteria) or "- (none)"
     files = "\n".join(f"- {item}" for item in card.files_hint) or "- (choose as needed)"
+    context_files = "\n".join(f"- {item}" for item in card.context_files) or "- (none)"
     user = _fill(
         prompts.WORKER_USER,
         ID=card.id,
@@ -134,7 +140,9 @@ def worker_propose(
         SPEC=card.spec or card.body,
         CRITERIA=criteria,
         FILES=files,
+        CONTEXT_FILES=context_files,
         CONTEXT=context or "(no existing files)",
+        SKILLS=skills or "(none)",
         FEEDBACK=feedback or "(none)",
     )
     raw = (llm or default_llm)(config, root, "worker", prompts.WORKER_SYSTEM, user)
@@ -176,6 +184,7 @@ def reviewer_verdict(
     diff_text: str,
     cycle: int,
     max_cycles: int,
+    skills: str = "",
     llm: LLM | None = None,
 ) -> dict[str, Any]:
     criteria = "\n".join(f"- {item}" for item in card.acceptance_criteria) or "- (none)"
@@ -185,6 +194,7 @@ def reviewer_verdict(
         TITLE=card.title,
         CRITERIA=criteria,
         DIFF=diff_text,
+        SKILLS=skills or "(none)",
         CYCLE=str(cycle),
         MAX_CYCLES=str(max_cycles),
     )

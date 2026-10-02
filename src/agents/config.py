@@ -17,6 +17,21 @@ GITIGNORE_BLOCK = """# --- agent-board runtime state (board cards are committed;
 .agents/board/**/.tmp-*
 """
 
+GITATTRIBUTES_BLOCK = """# agent-board: keep generated/lock files out of review diffs
+package-lock.json -diff
+npm-shrinkwrap.json -diff
+yarn.lock -diff
+pnpm-lock.yaml -diff
+bun.lockb -diff
+poetry.lock -diff
+Cargo.lock -diff
+composer.lock -diff
+Gemfile.lock -diff
+go.sum -diff
+*.min.js -diff
+*.min.css -diff
+"""
+
 GITIGNORE_TEMPLATE = (
     """# --- Secrets / environment ---
 .env
@@ -121,13 +136,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cost_controls": {
         "monthly_budget_usd": 25.0,
         "halt_on_budget_exceeded": True,
-        "max_llm_calls_per_run": 12,
+        "max_llm_calls_per_tick": 60,
         "max_output_tokens_per_call": 8000,
         "max_input_chars": 48000,
         "max_diff_lines": 600,
     },
     "context": {
         "max_files_per_task": 8,
+        "always_skills": [],
         "protected_paths": [
             f"{AGENTS_DIRNAME}/**",
             ".git/**",
@@ -198,7 +214,7 @@ def scaffold(root: Path, project_name: str = "") -> Board:
     board = Board(root)
     for column in COLUMNS:
         board.column_dir(column).mkdir(parents=True, exist_ok=True)
-    for name in ("specs", "logs", "worktrees"):
+    for name in ("specs", "logs", "worktrees", "skills"):
         (agents / name).mkdir(parents=True, exist_ok=True)
 
     config_path = agents / "config.json"
@@ -222,6 +238,7 @@ def scaffold(root: Path, project_name: str = "") -> Board:
         )
 
     ensure_gitignore(Path(root))
+    ensure_gitattributes(Path(root))
 
     return board
 
@@ -236,4 +253,17 @@ def ensure_gitignore(root: Path) -> Path:
         return path
     separator = "" if existing.endswith("\n") else "\n"
     path.write_text(existing + separator + "\n" + GITIGNORE_BLOCK)
+    return path
+
+
+def ensure_gitattributes(root: Path) -> Path:
+    path = Path(root) / ".gitattributes"
+    if not path.exists():
+        path.write_text(GITATTRIBUTES_BLOCK)
+        return path
+    existing = path.read_text()
+    if "package-lock.json -diff" in existing:
+        return path
+    separator = "" if existing.endswith("\n") else "\n"
+    path.write_text(existing + separator + "\n" + GITATTRIBUTES_BLOCK)
     return path

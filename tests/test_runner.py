@@ -1,10 +1,7 @@
 import sys
 import tempfile
 import unittest
-import warnings
 from pathlib import Path
-
-warnings.filterwarnings("ignore", category=ResourceWarning)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 

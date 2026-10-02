@@ -72,6 +72,10 @@ def diff(root: Path, base: str, branch: str) -> str:
     return git(root, "diff", f"{base}...{branch}", check=False).stdout
 
 
+def diff_stat(root: Path, base: str, branch: str) -> str:
+    return git(root, "diff", "--stat", f"{base}...{branch}", check=False).stdout
+
+
 def unmerged(root: Path) -> dict[str, str]:
     output = git(root, "diff", "--name-only", "--diff-filter=U", check=False).stdout
     conflicts: dict[str, str] = {}

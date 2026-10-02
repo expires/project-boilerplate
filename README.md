@@ -88,8 +88,29 @@ The runner reads `AI_ECONOMY_API_KEY` from `.env`. It is the only thing that cal
 ```
 
 A card is a Markdown file with YAML frontmatter (`id`, `title`, `status`, `priority`,
-`depends_on`, `route`, `acceptance_criteria`, `files_hint`, `branch`, `history`, …). You
-never write these by hand — Claude does, through the CLI.
+`depends_on`, `route`, `acceptance_criteria`, `files_hint`, `context_files`, `skills`,
+`branch`, `history`, …). You never write these by hand — Claude does, through the CLI.
+
+## Project skills (conventions for the workers)
+
+Reusable conventions live in `.agents/skills/<name>.md` (e.g. `styling.md`, `testing.md`).
+They are injected into the **worker and reviewer** prompts so implementations stay consistent:
+
+- Reference one per card: `skills: ["styling"]` (CLI: `agents add … --skill styling`).
+- Or apply everywhere via `context.always_skills: ["styling"]` in `.agents/config.json`.
+- List what exists with `agents skills`.
+- Keep each skill short and binding (a page of hard rules beats an essay).
+
+Example — `.agents/skills/styling.md`:
+```markdown
+# Styling
+- Use Blueprint components and the `Classes.DARK` theme; no bespoke widgets.
+- Dense spacing: 1px `#2F343C` dividers, 4px radius, no large shadows.
+- All custom CSS in `src/styles.css`; no inline styles.
+```
+
+Writing the skill file first is part of planning: if a convention matters, capture it as a
+skill so every future worker (and the reviewer checking them) follows it.
 
 ## Configuration
 
@@ -110,7 +131,8 @@ never write these by hand — Claude does, through the CLI.
 - **Cards never move** — is `agents run` actually running? Is `AI_ECONOMY_API_KEY` set in `.env`?
 - **A card is stuck in `blocked/`** — ask Claude: *"show me `agents logs T-004` and propose a fix, then unblock it."*
 - **`/agents-add` didn't trigger** — invoke it directly as `/agents-add <feature>`, or ask Claude to "add a task for …".
-- **Skills missing** — re-run `agents install-skill`.
+- **Architect skill missing** (`/agents-init`, `/agents-add`) — re-run `agents install-skill`.
+- **Workers ignore a convention** — add it as a project skill in `.agents/skills/` and reference it (`skills: ["<name>"]`) or set `context.always_skills`.
 
 ## Development
 
