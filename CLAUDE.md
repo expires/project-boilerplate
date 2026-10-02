@@ -1,66 +1,60 @@
 # CLAUDE.md
 
-## Role: Software Architect / Product Owner (local terminal)
+## What this repository is
 
-You are the **Software Architect and Product Owner** for this repository, running in the human's local terminal. The human is the Stakeholder. This repository is operated as a single-terminal workflow:
+`agent-board` — a reusable Python CLI for running a local, filesystem-based multi-agent board. This repo is the **tool source**, not an application. Application work happens in *target* projects that install this CLI and contain their own `.agents/` directory.
+
+## Architecture
+
+Two layers, deliberately decoupled:
 
 ```
-Human (Stakeholder) -> You (Architect, local Claude Code) -> GitHub Issue
-      -> Background CI/CD Pipeline (PM, Workers, Reviewer) -> PRs in Clean Project Repo -> Merge
+You (human)
+  -> Architect (Claude Code, via the agent-board skill)   # plans, interviews, drops specs
+      -> .agents/specs/ and .agents/board/not_started/
+          -> agents daemon (DeepSeek PM / workers / reviewer)   # runs locally, calls the DeepSeek API
+              -> .agents/board/{in_progress,review,closed,blocked}/
 ```
 
-You are the only agent allowed to plan work. All automated background tasks (PM decomposition, worker implementation, PR review) run in GitHub Actions through the Background CI/CD Pipeline on the Economy LLM Tier using `AI_ECONOMY_API_KEY`. Claude Code runs locally under the human's own subscription; do **not** add any hosted LLM provider API key to `.env` or repository secrets, and do not call cloud LLM APIs for planning yourself.
+- **Claude = Architect only.** It writes `project.md`, decomposes nothing, edits no code. It must never call the DeepSeek API itself (the CLI does that).
+- **DeepSeek = PM, worker, reviewer.** All three run through the single `economy` provider (`AI_ECONOMY_API_KEY`).
 
-## Repositories (Dual-Repo Layout)
+## Hard rules
 
-- **Factory repo (this repository):** architecture, Master Specs, `tasks.json`, orchestration, and escalations. Create issues here.
-- **Clean project repo (`TARGET_REPO`, Repo B):** all application code, branches, and pull requests. Worker diffs and PRs never touch the factory repo.
-- Never write application files into the factory repo, and never implement Repo B code locally: Repo B changes only arrive through pipeline PRs.
+1. **No GitHub layer.** There are no issues, PRs, labels, workflows, or PATs. Do not reintroduce `gh`, `.github/`, or remote git operations.
+2. **No shell for workers.** A worker returns `{summary, files:[{path, content}]}`; the trusted orchestrator writes files and commits. The model never executes commands.
+3. **Per-project isolation.** All state lives under a project's `.agents/`. The package must never read another project's `.agents/` or keep cross-project context.
+4. **One provider.** DeepSeek via `economy`. Do not add Anthropic/OpenAI/other providers.
+5. **Protected paths.** `.agents/**`, `.git/**`, `.env*`, secrets, and key material are never writable by agents.
+6. **Stdlib only at runtime.** No third-party dependencies.
 
-## Hard Rules
+## Layout
 
-1. **Never write application implementation code directly.** No feature code, no tests for features, no migrations. Cloud workers implement; the reviewer approves; deterministic CI gates every merge.
-2. When the human asks to build, add, or architect a feature, you MUST:
-   1. Fill in `docs/MASTER_SPEC_TEMPLATE.md`.
-   2. Save the finished spec to a temporary file.
-   3. Create the Master Spec Issue with `gh issue create`, labeled `type:master-spec`.
-   4. Report the issue URL to the human and stop. Do not start implementing.
-3. Only touch pipeline/governance files (`config/agents.json`, `scripts/ai_bridge.py`, `.github/workflows/**`, `tasks.json`) or documentation when the human explicitly asks for pipeline changes.
-4. Keep the pipeline blind: never mention model identities in GitHub comments or issue bodies. `ai_bridge.py` sanitizes its own output; match that standard for anything you post.
-5. When the circuit breaker opens an issue labeled `agent:architect`, re-scope the feature into an updated or new Master Spec Issue. Never retry or reopen the closed PR.
+```
+src/agents/
+  frontmatter.py   # stdlib YAML-subset codec for card frontmatter
+  board.py         # project discovery, Card, atomic moves, lock, deps, leases
+  config.py        # default config + .agents/ scaffold
+  validate.py      # path normalization + protected-path checks
+  cli.py           # `agents` console entrypoint
+tests/             # unittest (stdlib)
+```
 
-## Creating a Master Spec Issue
+## Conventions
+
+- Python 3.11+ typing (`from __future__ import annotations`).
+- Board mutations go through `Board` under `board/.lock`; card moves are atomic.
+- Keep the CLI and board logic free of model calls; model I/O lives in a dedicated module.
+
+## Commands
 
 ```bash
-gh label create type:master-spec --description "Architect spec ready for PM decomposition" --color 5319e7 --force
-
-# 1. Fill in docs/MASTER_SPEC_TEMPLATE.md and save it, e.g. /tmp/master-spec.md
-# 2. Create the issue:
-gh issue create \
-  --title "Master Spec: <feature name>" \
-  --body-file /tmp/master-spec.md \
-  --label type:master-spec
+python -m unittest discover -s tests      # run tests
+agents init --name <project>              # scaffold .agents/ in a target project
+agents add "<feature>"                    # drop a spec
+agents status
 ```
 
-The `pm-plan` GitHub Actions job then decomposes the spec into `tasks.json`, and the Worker Engine pulls them from the queue automatically. Do not edit `tasks.json` by hand while the pipeline is running.
+## Roadmap
 
-## Initializing the Application Repository
-
-When the human asks to start a new project, connect a clean application repo, or initialize the target repository:
-
-1. Run `python3 scripts/ai_bridge.py init` from the factory repo.
-2. It prompts for the repository name (or accept `--name`, `--owner`, `--public`, `--with-ci` flags), creates the repository under the human's account, creates the pipeline labels there, and writes `TARGET_REPO` to `.env`.
-3. Report the created repository and tell the human to:
-   - add the `TARGET_REPO` repository variable in the factory repo's Actions settings,
-   - grant `AI_BRIDGE_PAT` access to both repositories.
-4. Do not write application code into the new repository yourself.
-
-## Monitoring (read-only)
-
-```bash
-python3 scripts/ai_bridge.py status
-gh issue list --label agent:architect --state open
-gh pr list --label agent:auto --state open
-```
-
-Escalation issues are the only place you (and the human) need to act: update the spec, then re-create the Master Spec Issue or re-apply the `type:master-spec` label. Escalations reference PRs in the clean project repo; re-scope them here in the factory repo without touching Repo B directly.
+P1 board + CLI (done) · P2 PM/worker/reviewer loop · P3 merge-conflict PM + budget · P4 Architect skill · P5 dogfood.

@@ -1,229 +1,108 @@
-# Multi-Agent Hackathon Boilerplate
+# agent-board
 
-A cost-optimized, hierarchical autonomous development pipeline built for a **dual-repo, single-terminal workflow**:
+A local, filesystem-based multi-agent board. Claude is the **Architect**; DeepSeek is the **PM, workers, and reviewer**. No GitHub, no CI, no remote services, no execution of model-generated shell commands.
 
-- **Factory repo (this repository)** — architecture, Master Specs, `tasks.json`, guardrails, and orchestration. Local Claude Code acts as the Architect/Product Owner here.
-- **Clean project repo (Repo B, `TARGET_REPO`)** — all application code changes and pull requests. Cloud workers never touch the factory repo; Orchestration never writes app code directly.
-
-Every automated background task (PM decomposition, worker implementation, PR review) runs in GitHub Actions on **DeepSeek only**, billed through one key (`AI_ECONOMY_API_KEY`).
+Everything lives in a `.agents/` directory inside your project:
 
 ```
- Human (Stakeholder) + Local Claude Code (Architect / Product Owner)   [Factory repo]
-        │  fills docs/MASTER_SPEC_TEMPLATE.md
-        │  gh issue create --label type:master-spec
-        ▼
- GitHub Issue (Master Spec)                                            [Factory repo]
-        │  Actions job `pm-plan` (DeepSeek)
-        ▼
- tasks.json queue ──────────────────────► claim ≤ 2 tasks (concurrency cap)
-        │
-        ▼
- Worker Agents (DeepSeek, depth 1, max 2 parallel)                     [Target repo]
-        │  context-isolated diff on exact files in app-workspace
-        ▼
- Pull Request (`agent:auto`)                                           [Target repo]
-        │
-        ▼
- Deterministic CI in the target repo  ── fail ──► PR blocked
-        │ pass
-        ▼
- Reviewer Agent (DeepSeek) via scheduled sweep                         [Target repo]
-        ├── approve ──────────────► merge, unblock dependents
-        └── changes ──────────────► strike (1..3)
-                                      │ 3 strikes
-                                      ▼
-                            Circuit Breaker: close PR, open Escalation Issue
-                                      │                                      [Factory repo]
-                                      ▼
-                     Back to local Claude Code to re-scope
+.agents/
+  project.md          # architect brief (purpose, stack, conventions, definition of done)
+  config.json         # roles/models, governance, protected paths, optional verify commands
+  board/
+    not_started/      # PM writes cards; workers pull
+    in_progress/      # claimed + leased
+    review/           # implementation done, awaiting reviewer
+    blocked/          # retries exhausted / escalations
+    closed/           # approved + merged
+  specs/              # feature specs the Architect drops for the PM to decompose
+  worktrees/<id>/     # isolated git worktree per in-flight task
+  logs/               # per-card logs
+  usage.json          # per-project token/cost ledger
 ```
 
-The human writes zero code and never joins CI/CD loops.
+Cards are Markdown files with YAML frontmatter:
 
-## Repositories and Responsibilities
+```markdown
+---
+id: T-001
+title: Add hello.py and its pytest
+status: not_started
+priority: 1
+depends_on: []
+route: backend
+acceptance_criteria: ['hello.py prints "hello"', 'tests/test_hello.py passes']
+files_hint: [hello.py, tests/test_hello.py]
+depth: 1
+attempts: 0
+review_cycles: 0
+branch: agent/t-001
+base: main
+---
 
-| Concern | Factory repo (A) | Target repo (B) |
-|---|---|---|
-| Master Specs / issues | yes | no |
-| `tasks.json` queue, usage state | yes | no |
-| `config/agents.json`, bridge, workflows | yes | no |
-| Application files, branches, PRs | no | yes |
-| Deterministic CI for app code | no | yes |
-| Agent review comments, strikes, merge | orchestrated from A | applied to PRs in B |
+Implement `hello.py` with a `greet()` function and a pytest test.
+```
 
-`TARGET_REPO` (`owner/name`) is read by the bridge locally and via the workflow's repository variable. In Actions, Repo B is cloned into `app-workspace` with `AI_BRIDGE_PAT`.
+## Requirements
 
-## Initializing the Application Repository
+- Python 3.11+
+- A DeepSeek API key in `AI_ECONOMY_API_KEY` (see `.env.example`)
 
-Local Claude Code (or the human) creates Repo B with one command. It prompts for the repository name, creates the repo, seeds labels, and records `TARGET_REPO` in `.env`:
+## Install
 
 ```bash
-python3 scripts/ai_bridge.py init
-# Name for the new application repository: my-clean-app
+pip install -e .
 ```
-
-Options: `--name my-clean-app`, `--owner my-org`, `--public`, `--with-ci` (seeds a minimal CI workflow in Repo B so the review gate has checks to read). Non-interactive sessions must pass `--name`.
-
-Then:
-1. Add repository variable `TARGET_REPO` in the factory repo (`Settings -> Secrets and variables -> Actions -> Variables`).
-2. Grant the fine-grained `AI_BRIDGE_PAT` access to **both** repositories (factory: contents/issues/pull-requests/actions write; target: contents/pull-requests/actions write). No `checks` permission is needed: fine-grained PATs cannot be granted Checks (GitHub limitation), so the review gate falls back to the Actions API (`actions: read`) to read CI status. A classic PAT with `repo` + `workflow` scopes also works.
-
-## Role Contracts
-
-| Role | Runtime | Trigger | Output | Never does |
-|---|---|---|---|---|
-| Stakeholder | human | — | Feature request | Code, CI, reviews |
-| Architect / Product Owner | **local Claude Code** | human request | Master Spec Issue (`type:master-spec`) | Implementation code |
-| Project Manager (DeepSeek) | Actions in factory repo | Master Spec Issue | `tasks.json` entries + labels | Code |
-| Worker (DeepSeek) | queue engine | claimed task | Branch + PR in target repo | Spawn agents, touch protected files, read whole repo |
-| Reviewer (DeepSeek) | scheduled sweep / dispatch | green CI on `agent:auto` PR | Approve / request changes | Write code |
-
-## The Queue (`tasks.json`)
-
-Every unit of work is one object, stored only in the factory repo. The queue is the single source of truth and the only place agents coordinate state.
-
-| Status | Meaning | Transitions to |
-|---|---|---|
-| `pending` | ready when `depends_on` all `merged` | `claimed` |
-| `claimed` | leased by a worker, lease expires via `requeue-stale` | `in_progress`, `pending` |
-| `in_progress` | DeepSeek worker executing against Repo B | `review`, `pending` (retry), `failed` |
-| `review` | PR open in Repo B, CI/reviewer running | `merged`, `changes_requested`, `escalated` |
-| `changes_requested` | reviewer asked for fixes, strike recorded | `claimed` (re-run with feedback) |
-| `merged` | done; unblocks dependents | terminal |
-| `failed` | attempts exhausted | `escalated` |
-| `escalated` | circuit breaker tripped | local Architect re-plans |
-
-## Guardrails
-
-| Guardrail | Value | Enforced by |
-|---|---|---|
-| Max worker concurrency | 2 | `config/agents.json` + matrix `max-parallel` + claim-time count |
-| Max open agent PRs | 2 | queue engine (`max_open_prs`) |
-| Max agent depth | 1 (workers cannot spawn agents) | plan validation + worker prompt + no queue-append command |
-| Review retries | 3 | `review_cycles` counter + strike labels |
-| CI before review | required | `gh pr checks` verification against Repo B in the bridge |
-| Context isolation | target files only | `task.files` / `task.allowed_paths`, char/token cap |
-| Protected paths | CI, config, bridge, queue, CLAUDE.md, secrets | `is_protected()` in bridge; worker diff rejected |
-| Monthly LLM budget | `cost_controls.monthly_budget_usd` | usage cache + hard halt |
-| Blind collaboration | on | model identity terms scrubbed from all GitHub output |
-| Loop prevention | bot actors ignored, idempotent planning, sticky terminal states | workflow `if:` + bridge state checks |
-
-## Model Routing
-
-All cloud roles run on DeepSeek through the single **economy** provider:
-
-| Role | Default model | Env override |
-|---|---|---|
-| PM | `deepseek-chat` | `PM_MODEL` |
-| Worker | `deepseek-coder` | `WORKER_MODEL` |
-| Reviewer | `deepseek-chat` | `REVIEWER_MODEL` |
-
-- Endpoint: `https://api.deepseek.com/v1` (override with `AI_ECONOMY_BASE_URL`).
-- Key: `AI_ECONOMY_API_KEY` only. No Anthropic/OpenAI key is used anywhere in the cloud.
-- If a role is pointed at another provider whose key is missing, the router falls back to the economy provider and `fallback_model_default`.
-- Architect planning never calls an API: local Claude Code does it under the human's own subscription.
-
-## Circuit Breaker
-
-1. Reviewer requests changes → `strike:1`, `strike:2`, `strike:3` labels on the Repo B PR.
-2. On strike 3 the bridge:
-   - posts the full review history on the PR,
-   - closes (and optionally deletes the branch of) the PR,
-   - opens `[Escalation] <task>` in the factory repo with labels `escalation` + `agent:architect`,
-   - marks the task `escalated` and labels the Master Spec `pipeline:halted`.
-3. Local Claude Code re-scopes the feature and creates a new Master Spec Issue. No automatic re-entry.
-
-Technical failures follow the same path: `max_task_attempts` exceeded → escalation, no PR loop.
 
 ## Quickstart
 
-1. Push the factory repo to GitHub (Actions enabled).
-2. Add two repository secrets (`Settings -> Secrets and variables -> Actions`):
+```bash
+cd your-project
+agents init --name my-app          # scaffold .agents/
+agents add "Add hello.py and its pytest"
+agents status
+```
 
-   | Name | Purpose |
-   |---|---|
-   | `AI_ECONOMY_API_KEY` | DeepSeek key used by PM, Worker, and Reviewer |
-   | `AI_BRIDGE_PAT` | Fine-grained PAT with access to **both** repos. Factory: `contents`, `issues`, `pull-requests`, `actions` write. Target: `contents`, `pull-requests`, `actions` write. No `checks` permission exists for fine-grained PATs; CI status is read via the Actions API. A classic PAT with `repo` + `workflow` also works. **Required for autonomous loops** because `GITHUB_TOKEN`-created PRs do not trigger workflows |
+The Architect skill (Claude Code) wraps `init` and `add` with an interview so you never have to hand-write the brief. Until the skill ships, drive the CLI directly.
 
-3. Initialize Repo B locally, then set the `TARGET_REPO` repository variable:
+## CLI
 
-   ```bash
-   python3 scripts/ai_bridge.py init --with-ci
-   ```
+| Command | Purpose |
+|---|---|
+| `agents init [--name N]` | scaffold `.agents/` in the current directory |
+| `agents add "<feature>"` | drop a spec into `.agents/specs/` |
+| `agents status [--json]` | print the board |
+| `agents card <id> [--json]` | show one card |
+| `agents move <id> --to <column> [--note N]` | move a card between columns |
 
-4. Create factory labels: `type:master-spec`, `spec:planned`, `agent:auto`, `pipeline:halted`, `escalation`, `agent:architect`, `strike:1`, `strike:2`, `strike:3`. Repo B labels are created automatically by `init`.
-5. Ask local Claude Code to build a feature. It fills `docs/MASTER_SPEC_TEMPLATE.md` and creates the issue:
+## Role contracts
 
-   ```bash
-   gh issue create --title "Master Spec: <feature>" --body-file /tmp/master-spec.md --label type:master-spec
-   ```
+- **Architect (Claude)** — interviews you, writes `project.md`, drops specs. Never edits code.
+- **PM (DeepSeek)** — decomposes specs into cards; owns ordering and merge/conflict resolution.
+- **Worker (DeepSeek)** — returns file contents for exactly one card; the trusted orchestrator writes files and commits to the task branch. No shell.
+- **Reviewer (DeepSeek)** — reads `git diff main...agent/<id>`; approves (merge + close) or requests changes.
 
-6. The PM plans in the factory repo, DeepSeek workers push branches and open PRs in Repo B, Repo B CI runs, and the DeepSeek reviewer decides during the scheduled sweep. Intervene only in escalation issues.
+## State machine
 
-### Local dry run (no tokens, no mutations)
+`not_started → in_progress → review → closed`, with `review → in_progress` on changes requested and any state → `blocked` when retries are exhausted. Merges are serialized and linear (`rebase` + `--ff-only`).
+
+## Isolation
+
+The CLI locates the nearest `.agents/` from the current directory and reads only that. Usage, logs, and cards are per project; the package keeps no cross-project state. Only credentials come from the environment.
+
+## Status
+
+**P1 (current):** package, board model, CLI (`init/add/status/card/move`), project discovery, tests.
+
+**Next:**
+- **P2** — PM decomposition, worker (git worktree), reviewer, full close loop.
+- **P3** — PM merge/conflict resolution, circuit breaker, per-project budget/logs, optional `verify` commands.
+- **P4** — Claude Code Architect skill, docs.
+- **P5** — dogfood on a throwaway repo.
+
+## Development
 
 ```bash
-cp .env.example .env        # optional for live calls; --dry-run needs no credentials
-python3 scripts/ai_bridge.py status
-python3 scripts/ai_bridge.py plan --issue 1 --dry-run
-python3 scripts/ai_bridge.py claim --limit 2
-python3 scripts/ai_bridge.py run --task-id T-001 --dry-run
-python3 scripts/ai_bridge.py sweep --dry-run
-python3 scripts/ai_bridge.py review --pr 42 --dry-run
-python3 scripts/ai_bridge.py requeue-stale --minutes 45
+python -m unittest discover -s tests
 ```
 
-## Configuration (`config/agents.json`)
-
-- `governance` — caps: `max_concurrency`, `max_open_prs`, `max_depth`, `review_retries`, `max_task_attempts`, `auto_merge`, `lease_minutes`.
-- `cost_controls` — token/char/diff ceilings, monthly USD budget with hard halt, and `restrict_worker_to_economy`.
-- `context` — `max_files_per_task`, `max_context_tokens`, `protected_paths`.
-- `roles` + `providers` + `pricing` — every cloud role routes to the DeepSeek endpoint via `AI_ECONOMY_API_KEY`.
-- `target` — `TARGET_REPO` env name, `AI_BRIDGE_APP_DIR` override, and the default `app-workspace` path.
-- `blind_collaboration.strip_identity_terms` — words scrubbed from every comment the bridge posts.
-- `labels` and `escalation` — GitHub primitive names and Architect assignment.
-
-Model routing is human-owned. Agents themselves never see or publish model identities.
-
-## Workflow (`.github/workflows/ai-orchestration.yml`)
-
-| Trigger | Job | Behavior |
-|---|---|---|
-| Issue labeled `type:master-spec` | `pm-plan` | PM decomposes into queue in the factory repo |
-| `pull_request` (factory only) | `ci` | Deterministic lint/test/compile for pipeline changes |
-| schedule / dispatch `review` | `review` | Sweeps open `agent:auto` PRs in Repo B; single-repo mode reviews locally |
-| schedule / dispatch `pump` | `claim` → `workers` | Claims ≤ 2 tasks; workers clone Repo B into `app-workspace` and open PRs there |
-| dispatch `status` / `requeue` / schedule | `maintenance` | Lease recovery, queue report |
-
-Queue-writing jobs share the concurrency group `ai-queue-<repo>` so claims can never race. Every dirty queue transaction is committed and pushed back to the factory repo by the bridge (`AI_BRIDGE_PERSIST=1` in Actions); those commits authenticate with the workflow's `GITHUB_TOKEN`, so queue persistence is independent of `AI_BRIDGE_PAT` scoping. This is how `pm-plan` → `claim` → `workers` → `review` share state across runs. Repo B must provide its own CI workflow (or use `init --with-ci`) so the reviewer's `gh pr checks` gate has results to read.
-
-## Cost Model
-
-- **Deterministic CI first**: the reviewer is only paid after Repo B's lint/tests pass.
-- **One provider**: PM, workers, and reviewer all use DeepSeek; the local Architect costs no API tokens.
-- **Queue batching**: at most 2 workers and 2 open PRs; no speculative parallelism.
-- **Context isolation**: workers receive only `task.files` contents from Repo B under `max_context_tokens`.
-- **Budget halt**: `.ai-bridge/usage.json` is persisted via `actions/cache`; at 100% of the monthly budget the bridge refuses further LLM calls. Cache eviction resets the counter — for production, mirror it to an artifact or external store.
-- **Escalation instead of retry storms**: 3 review strikes is the hard stop.
-
-## File Map
-
-```
-CLAUDE.md                                local Architect role, dual-repo rules, issue workflow
-.github/workflows/ai-orchestration.yml   pipeline: PM, CI, queue pump, review sweep
-config/agents.json                       routing, caps, budget, target repo, protected paths
-tasks.json                               PM queue (single source of truth, factory repo)
-docs/MASTER_SPEC_TEMPLATE.md             Architect template
-scripts/ai_bridge.py                     orchestration engine (stdlib only)
-.env.example                             TARGET_REPO + AI_ECONOMY_API_KEY + GH_TOKEN reference
-.ai-bridge/                              local usage/state (gitignored)
-```
-
-## Known Constraints
-
-- Autonomous chaining requires `AI_BRIDGE_PAT`; without it, PRs opened by `github-actions[bot]` will not trigger CI/review workflows. Manual `workflow_dispatch` still works.
-- Queue persistence pushes `tasks.json` to the factory branch on every mutation (up to 3 rebase/push retries). Parallel workers can briefly contend on the file; a rebase conflict fails the run loudly rather than losing state.
-- The factory workflow cannot listen to `pull_request` events in Repo B, so agent reviews run from the scheduled sweep (every 20 minutes) or an explicit dispatch. Repo B CI still gates the review itself.
-- Repo B must expose CI checks; otherwise the reviewer refuses to run (`no CI checks found`). Use `init --with-ci` for a starter workflow.
-- Budget accounting via `actions/cache` is best-effort (GitHub evicts caches); mirror usage for strict accounting.
-- The bridge intentionally refuses to modify its own guardrails (`scripts/ai_bridge.py`, `config/agents.json`, `.github/workflows/**`, `tasks.json`, `CLAUDE.md`). Changing them is a human/Architect action.
+Stdlib-only at runtime; no third-party dependencies.
