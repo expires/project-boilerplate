@@ -58,6 +58,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "timeout_seconds": 180,
         },
     },
+    "routes": ["backend", "frontend", "infra", "test", "docs"],
     "governance": {
         "max_concurrency": 2,
         "max_depth": 1,
@@ -103,6 +104,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_branch": "main",
         "branch_prefix": "agent/",
         "commit_prefix": "feat(agent)",
+    },
+    "pricing": {
+        "economy": {
+            "input_per_1k_usd": 0.00014,
+            "output_per_1k_usd": 0.00028,
+        }
     },
     "blind_collaboration": {
         "enabled": True,

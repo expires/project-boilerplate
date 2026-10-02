@@ -5,6 +5,7 @@ import dataclasses
 import fcntl
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,10 @@ _ID = re.compile(r"T-(\d+)")
 
 class BoardError(Exception):
     pass
+
+
+def log(message: str) -> None:
+    print(f"[agents] {message}", file=sys.stderr)
 
 
 def utcnow() -> datetime:
@@ -77,6 +82,9 @@ class Card:
     branch: str = ""
     base: str = "main"
     lease_until: str = ""
+    spec: str = ""
+    last_review_summary: str = ""
+    blocking_issues: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
     history: list[dict[str, str]] = field(default_factory=list)
@@ -97,6 +105,9 @@ class Card:
         "branch",
         "base",
         "lease_until",
+        "spec",
+        "last_review_summary",
+        "blocking_issues",
         "created_at",
         "updated_at",
         "history",

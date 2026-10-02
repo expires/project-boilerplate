@@ -70,6 +70,7 @@ The Architect skill (Claude Code) wraps `init` and `add` with an interview so yo
 |---|---|
 | `agents init [--name N]` | scaffold `.agents/` in the current directory |
 | `agents add "<feature>"` | drop a spec into `.agents/specs/` |
+| `agents run [--once] [--concurrency N]` | run the PM → worker → reviewer loop |
 | `agents status [--json]` | print the board |
 | `agents card <id> [--json]` | show one card |
 | `agents move <id> --to <column> [--note N]` | move a card between columns |
@@ -91,11 +92,12 @@ The CLI locates the nearest `.agents/` from the current directory and reads only
 
 ## Status
 
-**P1 (current):** package, board model, CLI (`init/add/status/card/move`), project discovery, tests.
+**P1:** package, board model, CLI (`init/add/status/card/move`), project discovery.
+
+**P2 (current):** PM decomposition, worker via git worktree, reviewer, full close loop, budget accounting, `agents run`.
 
 **Next:**
-- **P2** — PM decomposition, worker (git worktree), reviewer, full close loop.
-- **P3** — PM merge/conflict resolution, circuit breaker, per-project budget/logs, optional `verify` commands.
+- **P3** — PM merge/conflict resolution, circuit breaker polish, optional `verify` commands.
 - **P4** — Claude Code Architect skill, docs.
 - **P5** — dogfood on a throwaway repo.
 

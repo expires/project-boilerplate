@@ -7,7 +7,9 @@ from pathlib import Path
 
 from . import __version__
 from .board import AGENTS_DIRNAME, COLUMNS, Board, BoardError, card_as_dict, find_project_root, slugify, utcnow
-from .config import scaffold
+from .config import load_config, scaffold
+from .llm import load_dotenv
+from .orchestrator import Orchestrator
 
 
 def _resolve_root(args: argparse.Namespace) -> Path:
@@ -63,6 +65,18 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    root = _resolve_root(args)
+    load_dotenv(root / ".env")
+    config = load_config(root)
+    if args.concurrency:
+        config["governance"]["max_concurrency"] = args.concurrency
+    orchestrator = Orchestrator(root, config)
+    ticks = orchestrator.run(once=args.once)
+    print(f"processed {ticks} tick(s)")
+    return cmd_status(argparse.Namespace(root=str(root), json=False))
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     board = Board(_resolve_root(args))
     cards = board.cards()
@@ -103,6 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
     add = sub.add_parser("add", help="drop a feature spec for the PM to decompose")
     add.add_argument("text", help="feature description")
     add.set_defaults(func=cmd_add)
+
+    run = sub.add_parser("run", help="run the orchestrator loop")
+    run.add_argument("--once", action="store_true", help="run a single tick")
+    run.add_argument("--concurrency", type=int, help="override governance.max_concurrency")
+    run.set_defaults(func=cmd_run)
 
     status = sub.add_parser("status", help="show the board")
     status.add_argument("--json", action="store_true")
