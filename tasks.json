@@ -1,8 +1,49 @@
 {
   "version": 1,
-  "master_spec_issue": null,
-  "updated_at": null,
-  "tasks": [],
+  "master_spec_issue": 1,
+  "updated_at": "2026-10-02T15:24:54+00:00",
+  "tasks": [
+    {
+      "id": "T-001",
+      "title": "Add hello.py script and its pytest test",
+      "status": "pending",
+      "agent_label": "agent:backend",
+      "depth": 1,
+      "spec": "Create exactly two new files at the repository root; do not modify any existing file.\n\n1) `hello.py` (repository root):\n- Python 3, standard library only.\n- Define `def main() -> None:` whose body prints exactly `hello from the pipeline` (use `print(\"hello from the pipeline\")`, which emits the message plus a single trailing newline).\n- End the file with:\n  if __name__ == \"__main__\":\n      main()\n- No CLI arguments, no logging, no configuration, no imports beyond the standard library (none are needed).\n- Do NOT add `requirements.txt`, `pyproject.toml`, `setup.py`, `__init__.py`, or any other file.\n\n2) `tests/test_hello.py`:\n- Must pass when `python -m pytest -q` is run from the repository root, with no `__init__.py` anywhere.\n- Use one of these two approaches (pick one and keep it simple):\n  (a) capsys approach: at the top of the test file insert the repository root into `sys.path` before importing, e.g.\n      import os, sys\n      sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\n      import hello\n      def test_main_prints_message(capsys):\n          hello.main()\n          captured = capsys.readouterr()\n          assert captured.out == \"hello from the pipeline\\n\"\n  (b) subprocess approach: run the script with the current interpreter, e.g.\n      import subprocess, sys, os\n      def test_script_output():\n          root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n          result = subprocess.run([sys.executable, os.path.join(root, \"hello.py\")], capture_output=True, text=True)\n          assert result.returncode == 0\n          assert result.stdout == \"hello from the pipeline\\n\"\n- The assertion must check the exact string `hello from the pipeline` followed by a single newline.\n\nContext the worker needs: the repository is new and empty apart from existing CI config. CI only runs pytest when a `requirements.txt` or `pyproject.toml` exists; this task intentionally adds neither, so CI will pass without executing the test. That is accepted; do not add a manifest to work around it. The reviewer verifies AC1 and AC3 by reading the code. Do not touch `.github/workflows/**`, `README.md`, or any other existing file.",
+      "acceptance_criteria": [
+        "`python hello.py` run from the repository root prints exactly `hello from the pipeline` followed by a single newline and exits with code 0.",
+        "`hello.py` defines `main()` that prints the message and calls it under `if __name__ == \"__main__\":`.",
+        "`python -m pytest -q` run from the repository root passes, with `tests/test_hello.py` asserting the exact output `hello from the pipeline\\n`.",
+        "The change adds exactly two files, `hello.py` and `tests/test_hello.py`; no existing file is modified and no dependency manifest or `__init__.py` is added."
+      ],
+      "files": [
+        "hello.py",
+        "tests/test_hello.py"
+      ],
+      "allowed_paths": [
+        "hello.py",
+        "tests/**"
+      ],
+      "depends_on": [],
+      "priority": 1,
+      "estimate": "S",
+      "attempts": 0,
+      "review_cycles": 0,
+      "pr": null,
+      "branch": null,
+      "lease_until": null,
+      "last_review": null,
+      "source_issue": 1,
+      "created_at": "2026-10-02T15:24:54+00:00",
+      "updated_at": "2026-10-02T15:24:54+00:00",
+      "history": [
+        {
+          "at": "2026-10-02T15:24:54+00:00",
+          "note": "planned from master spec issue #1"
+        }
+      ]
+    }
+  ],
   "_template": {
     "id": "T-001",
     "title": "Short imperative task title",
