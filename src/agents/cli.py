@@ -5,8 +5,8 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__
-from .board import AGENTS_DIRNAME, COLUMNS, Board, BoardError, card_as_dict, find_project_root, slugify, utcnow
+from . import __version__, roles
+from .board import AGENTS_DIRNAME, COLUMNS, Board, BoardError, card_as_dict, find_project_root
 from .config import load_config, scaffold
 from .llm import load_dotenv
 from .logs import read_log
@@ -50,29 +50,83 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"initialized {root / AGENTS_DIRNAME}")
     print(f"  board: {', '.join(COLUMNS)}")
     print("next:")
+    print(f"  - set AI_ECONOMY_API_KEY in {root / '.env'}")
     print(f"  - edit {root / AGENTS_DIRNAME / 'project.md'}")
     print(f"  - edit {root / AGENTS_DIRNAME / 'config.json'}")
-    print("  - add work: agents add \"<feature>\"")
+    print("  - add work: agents add \"<task title>\"")
+    print("  - run it:   agents run")
     return 0
+
+
+def _read_text(value: str | None) -> str:
+    if not value or value == "-":
+        return sys.stdin.read()
+    return Path(value).read_text()
 
 
 def cmd_add(args: argparse.Namespace) -> int:
     board = Board(_resolve_root(args))
-    specs = board.agents / "specs"
-    specs.mkdir(parents=True, exist_ok=True)
-    stamp = utcnow().strftime("%Y%m%d-%H%M%S")
-    path = specs / f"{stamp}-{slugify(args.text)}.md"
-    path.write_text(args.text.strip() + "\n")
-    print(str(path))
+    body = _read_text(args.body_file).strip() if args.body_file else ""
+    spec = body or args.text
+    for dep in args.depends_on or []:
+        board.find(dep)
+    card = board.create(
+        args.text,
+        body=spec,
+        spec=spec,
+        route=args.route or "backend",
+        priority=args.priority if args.priority is not None else 100,
+        files_hint=list(args.file or []),
+        acceptance_criteria=list(args.criterion or []),
+        depends_on=list(args.depends_on or []),
+    )
+    print(card.id)
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    root = _resolve_root(args)
+    board = Board(root)
+    config = load_config(root)
+    raw = _read_text(args.file)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BoardError(f"invalid plan JSON: {exc}") from exc
+    tasks = payload.get("tasks") if isinstance(payload, dict) else payload
+    planned = roles.validate_planned_tasks(config, tasks)
+    keys = {task["key"] for task in planned}
+    for task in planned:
+        for dep in task["depends_on"]:
+            if dep not in keys:
+                board.find(dep)
+    id_by_key: dict[str, str] = {}
+    for task in planned:
+        card = board.create(
+            task["title"],
+            body=task["spec"],
+            spec=task["spec"],
+            route=task["route"],
+            priority=task["priority"],
+            files_hint=task["files"],
+            acceptance_criteria=task["acceptance_criteria"],
+        )
+        id_by_key[task["key"]] = card.id
+    for task in planned:
+        deps = [id_by_key[dep] if dep in id_by_key else dep for dep in task["depends_on"]]
+        if deps:
+            board.update(id_by_key[task["key"]], depends_on=deps)
+    print(json.dumps({"created": [id_by_key[task["key"]] for task in planned]}))
     return 0
 
 
 def cmd_install_skill(args: argparse.Namespace) -> int:
     project = bool(args.project)
     root = (Path(args.root).resolve() if args.root else Path.cwd()) if project else None
-    destination = install_skill(root, project=project)
+    destinations = install_skill(root, project=project)
     scope = "project" if project else "user"
-    print(f"installed agent-board skill ({scope}): {destination}")
+    for destination in destinations:
+        print(f"installed ({scope}): {destination}")
     return 0
 
 
@@ -153,12 +207,23 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--name", help="project name for the brief header")
     init.set_defaults(func=cmd_init)
 
-    add = sub.add_parser("add", help="drop a feature spec for the PM to decompose")
-    add.add_argument("text", help="feature description")
+    add = sub.add_parser("add", help="create one task card on the board")
+    add.add_argument("text", help="task title")
+    add.add_argument("--body-file", help="file with the task spec, or - for stdin")
+    add.add_argument("--file", action="append", help="file the task may change (repeatable)")
+    add.add_argument("--criterion", action="append", help="acceptance criterion (repeatable)")
+    add.add_argument("--depends-on", action="append", help="existing card id dependency (repeatable)")
+    add.add_argument("--route", default="", help="routing label (default backend)")
+    add.add_argument("--priority", type=int, help="lower runs first (default 100)")
     add.set_defaults(func=cmd_add)
 
-    run = sub.add_parser("run", help="run the orchestrator loop")
-    run.add_argument("--once", action="store_true", help="run a single tick")
+    plan = sub.add_parser("plan", help="bulk-import task cards from JSON")
+    plan.add_argument("--file", help="JSON file, or - to read stdin (stdin is the default)")
+    plan.add_argument("--stdin", action="store_true", help="read JSON from stdin")
+    plan.set_defaults(func=cmd_plan)
+
+    run = sub.add_parser("run", help="run the orchestrator loop (watch mode by default)")
+    run.add_argument("--once", action="store_true", help="run a single tick and exit")
     run.add_argument("--concurrency", type=int, help="override governance.max_concurrency")
     run.set_defaults(func=cmd_run)
 
@@ -204,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
     except BoardError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":

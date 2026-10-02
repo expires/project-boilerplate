@@ -67,6 +67,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_tasks_per_spec": 12,
         "lease_minutes": 45,
         "poll_seconds": 5,
+        "decompose_specs": False,
     },
     "cost_controls": {
         "monthly_budget_usd": 25.0,
@@ -163,5 +164,12 @@ def scaffold(root: Path, project_name: str = "") -> Board:
     usage_path = agents / "usage.json"
     if not usage_path.exists():
         usage_path.write_text(json.dumps(initial_usage(), indent=2) + "\n")
+
+    env_path = Path(root) / ".env"
+    if not env_path.exists():
+        env_path.write_text(
+            "# agent-board: DeepSeek key used by the PM, workers, and reviewer.\n"
+            "AI_ECONOMY_API_KEY=\n"
+        )
 
     return board

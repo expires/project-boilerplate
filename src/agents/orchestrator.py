@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,8 @@ class Orchestrator:
         return len(self.board.requeue_expired())
 
     def _intake(self) -> int:
+        if not self.config.get("governance", {}).get("decompose_specs", False):
+            return 0
         specs = self.agents / "specs"
         if not specs.is_dir():
             return 0
@@ -48,11 +51,12 @@ class Orchestrator:
             for task in tasks:
                 card = self.board.create(
                     task["title"],
-                    body=text,
+                    body=task.get("spec") or text,
                     route=task["route"],
                     files_hint=task["files"],
                     acceptance_criteria=task["acceptance_criteria"],
-                    spec=text,
+                    priority=task.get("priority", 100),
+                    spec=task.get("spec") or text,
                 )
                 id_by_key[task["key"]] = card.id
             for task in tasks:
@@ -231,8 +235,9 @@ class Orchestrator:
             actions += self._review(card)
         return actions
 
-    def run(self, once: bool = False, max_ticks: int | None = None) -> int:
+    def run(self, once: bool = False, watch: bool = True, max_ticks: int | None = None) -> int:
         ticks = 0
+        poll = float(self.config.get("governance", {}).get("poll_seconds", 5) or 5)
         while True:
             actions = self.tick()
             ticks += 1
@@ -240,5 +245,7 @@ class Orchestrator:
             if once or (max_ticks is not None and ticks >= max_ticks):
                 break
             if actions == 0:
-                break
+                if not watch:
+                    break
+                time.sleep(poll)
         return ticks

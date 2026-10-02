@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,9 +23,9 @@ def _fill(template: str, **values: str) -> str:
     return result
 
 
-def _validate_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str, Any]]:
+def validate_planned_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str, Any]]:
     if not isinstance(tasks, list) or not tasks:
-        raise BoardError("PM returned no tasks")
+        raise BoardError("no tasks provided")
     max_tasks = int(config["governance"]["max_tasks_per_spec"])
     if len(tasks) > max_tasks:
         raise BoardError(f"PM returned {len(tasks)} tasks; cap is {max_tasks}")
@@ -48,6 +49,11 @@ def _validate_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str, Any]]:
             raise BoardError(f"task '{key}' lists {len(files)} files; cap is {max_files}")
         criteria = [str(c) for c in (item.get("acceptance_criteria") or []) if str(c).strip()]
         depends = [str(d) for d in (item.get("depends_on") or []) if str(d).strip()]
+        spec = str(item.get("spec") or item.get("body") or "").strip() or title
+        try:
+            priority = int(item.get("priority", 100))
+        except (TypeError, ValueError):
+            raise BoardError(f"task '{key}' has a non-numeric priority") from None
         normalized.append(
             {
                 "key": key,
@@ -56,11 +62,13 @@ def _validate_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str, Any]]:
                 "files": files,
                 "acceptance_criteria": criteria,
                 "depends_on": depends,
+                "priority": priority,
+                "spec": spec,
             }
         )
     for task in normalized:
         for dep in task["depends_on"]:
-            if dep not in keys:
+            if dep not in keys and not re.fullmatch(r"T-\d+", dep):
                 raise BoardError(f"task '{task['key']}' depends on unknown '{dep}'")
         for path in task["files"]:
             if is_protected(config, path):
@@ -106,7 +114,7 @@ def pm_decompose(
     raw = (llm or default_llm)(config, root, "pm", system, user)
     payload = extract_json(raw)
     tasks = payload.get("tasks") if isinstance(payload, dict) else payload
-    return _validate_tasks(config, tasks)
+    return validate_planned_tasks(config, tasks)
 
 
 def worker_propose(

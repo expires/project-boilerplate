@@ -73,6 +73,14 @@ class OrchestratorTests(unittest.TestCase):
         path.write_text(text + "\n")
         return path
 
+    def orchestrator(self, llm, decompose=True, configure=None):
+        cfg = config.load_config(self.root)
+        cfg["governance"]["decompose_specs"] = decompose
+        cfg["governance"]["poll_seconds"] = 0
+        if configure:
+            configure(cfg)
+        return Orchestrator(self.root, config=cfg, llm=llm)
+
     def worker_by_id(self, config_dict, root, user):
         match = re.search(r"TASK (T-\d+)", user)
         task_id = match.group(1)
@@ -87,8 +95,7 @@ class OrchestratorTests(unittest.TestCase):
             worker=json.dumps({"summary": "done", "files": [{"path": "hello.py", "content": "print('hi')\n"}]}),
             reviewer=approve_response(),
         )
-        orch = Orchestrator(self.root, llm=llm)
-        orch.run()
+        self.orchestrator(llm).run(watch=False)
         card = Board(self.root).find("T-001")
         self.assertEqual(card.status, "closed")
         self.assertTrue((self.root / "hello.py").is_file())
@@ -97,6 +104,18 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("pm", llm.roles)
         self.assertIn("worker", llm.roles)
         self.assertIn("reviewer", llm.roles)
+
+    def test_decompose_disabled_ignores_spec(self):
+        self.write_spec()
+        llm = FakeLLM(pm=pm_response([one_task()]), worker="{}", reviewer=approve_response())
+        self.orchestrator(llm, decompose=False).run(watch=False)
+        self.assertEqual(Board(self.root).cards(), [])
+        self.assertTrue((self.root / ".agents" / "specs" / "spec.md").is_file())
+
+    def test_watch_loop_terminates(self):
+        llm = FakeLLM(pm=pm_response([one_task()]), worker="{}", reviewer=approve_response())
+        ticks = self.orchestrator(llm, decompose=False).run(watch=True, max_ticks=3)
+        self.assertEqual(ticks, 3)
 
     def test_reject_then_approve(self):
         self.write_spec()
@@ -114,8 +133,8 @@ class OrchestratorTests(unittest.TestCase):
             reviews["n"] += 1
             return reject_response() if reviews["n"] == 1 else approve_response()
 
-        orch = Orchestrator(self.root, llm=FakeLLM(pm=pm_response([one_task()]), worker=worker, reviewer=reviewer))
-        orch.run()
+        llm = FakeLLM(pm=pm_response([one_task()]), worker=worker, reviewer=reviewer)
+        self.orchestrator(llm).run(watch=False)
         card = Board(self.root).find("T-001")
         self.assertEqual(card.status, "closed")
         self.assertEqual(card.review_cycles, 1)
@@ -129,21 +148,22 @@ class OrchestratorTests(unittest.TestCase):
             worker=json.dumps({"summary": "x", "files": [{"path": ".agents/config.json", "content": "{}"}]}),
             reviewer=approve_response(),
         )
-        orch = Orchestrator(self.root, llm=llm)
-        orch.run()
+        self.orchestrator(llm).run(watch=False)
         self.assertEqual(Board(self.root).find("T-001").status, "blocked")
 
     def test_diff_cap_blocks(self):
         self.write_spec()
         big = "\n".join(f"line {i}" for i in range(100)) + "\n"
-        cfg = config.load_config(self.root)
-        cfg["cost_controls"]["max_diff_lines"] = 5
         llm = FakeLLM(
             pm=pm_response([one_task()]),
             worker=json.dumps({"summary": "x", "files": [{"path": "hello.py", "content": big}]}),
             reviewer=approve_response(),
         )
-        Orchestrator(self.root, config=cfg, llm=llm).run()
+
+        def configure(cfg):
+            cfg["cost_controls"]["max_diff_lines"] = 5
+
+        self.orchestrator(llm, configure=configure).run(watch=False)
         self.assertEqual(Board(self.root).find("T-001").status, "blocked")
 
     def test_cycle_in_plan_fails_spec(self):
@@ -153,7 +173,7 @@ class OrchestratorTests(unittest.TestCase):
             one_task(key="2", title="B", files=["b.py"], depends_on=["1"]),
         ]
         llm = FakeLLM(pm=pm_response(cyclic), worker=self.worker_by_id, reviewer=approve_response())
-        Orchestrator(self.root, llm=llm).run()
+        self.orchestrator(llm).run(watch=False)
         self.assertEqual(Board(self.root).cards(), [])
         self.assertTrue((self.root / ".agents" / "specs" / "failed" / "spec.md").is_file())
 
@@ -177,7 +197,7 @@ class OrchestratorTests(unittest.TestCase):
             )
 
         llm = FakeLLM(pm=pm, worker=worker, reviewer=approve_response())
-        Orchestrator(self.root, llm=llm).run()
+        self.orchestrator(llm).run(watch=False)
         board = Board(self.root)
         self.assertEqual(board.find("T-001").status, "closed")
         self.assertEqual(board.find("T-002").status, "closed")
@@ -185,26 +205,30 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_verify_failure_blocks(self):
         self.write_spec()
-        cfg = config.load_config(self.root)
-        cfg["verify"] = {"enabled": True, "commands": ["python3 -c \"import sys; sys.exit(1)\""]}
         llm = FakeLLM(
             pm=pm_response([one_task()]),
             worker=json.dumps({"summary": "done", "files": [{"path": "hello.py", "content": "x\n"}]}),
             reviewer=approve_response(),
         )
-        Orchestrator(self.root, config=cfg, llm=llm).run()
+
+        def configure(cfg):
+            cfg["verify"] = {"enabled": True, "commands": ["python3 -c \"import sys; sys.exit(1)\""]}
+
+        self.orchestrator(llm, configure=configure).run(watch=False)
         self.assertEqual(Board(self.root).find("T-001").status, "blocked")
 
     def test_verify_success_closes(self):
         self.write_spec()
-        cfg = config.load_config(self.root)
-        cfg["verify"] = {"enabled": True, "commands": ["python3 -c \"print('ok')\""]}
         llm = FakeLLM(
             pm=pm_response([one_task()]),
             worker=json.dumps({"summary": "done", "files": [{"path": "hello.py", "content": "x\n"}]}),
             reviewer=approve_response(),
         )
-        Orchestrator(self.root, config=cfg, llm=llm).run()
+
+        def configure(cfg):
+            cfg["verify"] = {"enabled": True, "commands": ["python3 -c \"print('ok')\""]}
+
+        self.orchestrator(llm, configure=configure).run(watch=False)
         self.assertEqual(Board(self.root).find("T-001").status, "closed")
 
     def test_card_log_written(self):
@@ -214,7 +238,7 @@ class OrchestratorTests(unittest.TestCase):
             worker=json.dumps({"summary": "done", "files": [{"path": "hello.py", "content": "x\n"}]}),
             reviewer=approve_response(),
         )
-        Orchestrator(self.root, llm=llm).run()
+        self.orchestrator(llm).run(watch=False)
         log = read_log(self.root, "T-001")
         self.assertIn("worker started", log)
         self.assertIn("review verdict: approve", log)
@@ -226,7 +250,7 @@ class OrchestratorTests(unittest.TestCase):
             one_task(key="2", title="Second", files=["second.py"], depends_on=["1"]),
         ]
         llm = FakeLLM(pm=pm_response(tasks), worker=self.worker_by_id, reviewer=approve_response())
-        Orchestrator(self.root, llm=llm).run()
+        self.orchestrator(llm).run(watch=False)
         board = Board(self.root)
         self.assertEqual(board.find("T-001").status, "closed")
         self.assertEqual(board.find("T-002").status, "closed")

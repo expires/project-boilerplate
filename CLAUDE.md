@@ -10,14 +10,14 @@ Two layers, deliberately decoupled:
 
 ```
 You (human)
-  -> Architect (Claude Code, via the agent-board skill)   # plans, interviews, drops specs
-      -> .agents/specs/ and .agents/board/not_started/
-          -> agents daemon (DeepSeek PM / workers / reviewer)   # runs locally, calls the DeepSeek API
+  -> Architect (Claude Code, via /agents-init and /agents-add)   # interviews, plans, assigns cards
+      -> .agents/board/not_started/
+          -> agents run (DeepSeek PM / workers / reviewer)   # orchestrates + executes, calls the DeepSeek API
               -> .agents/board/{in_progress,review,closed,blocked}/
 ```
 
-- **Claude = Architect only.** It writes `project.md`, decomposes nothing, edits no code. It must never call the DeepSeek API itself (the CLI does that).
-- **DeepSeek = PM, worker, reviewer.** All three run through the single `economy` provider (`AI_ECONOMY_API_KEY`).
+- **Claude = Architect.** It writes `project.md` and **authors task cards** onto the board turn-by-turn. It edits no code and must never call the DeepSeek API itself (the CLI/runner does that).
+- **DeepSeek = PM, worker, reviewer.** The PM orchestrates scheduling/dependencies and merge/conflict resolution (it can also decompose raw `specs/` when `governance.decompose_specs` is on). All three run through the single `economy` provider (`AI_ECONOMY_API_KEY`).
 
 ## Hard rules
 
@@ -50,11 +50,13 @@ tests/             # unittest (stdlib)
 
 ```bash
 python -m unittest discover -s tests      # run tests
-agents init --name <project>              # scaffold .agents/ in a target project
-agents add "<feature>"                    # drop a spec
+agents init --name <project>              # scaffold .agents/ + .env in a target project
+agents add "<title>" --file f.py --criterion "..."   # create one task card
+agents plan --stdin                       # bulk-import cards from JSON
+agents run                                # watch mode (default)
 agents status
 ```
 
 ## Roadmap
 
-P1 board + CLI · P2 PM/worker/reviewer loop · P3 merge-conflict PM + logs + verify · P4 Architect skill · P5 dogfood — all done.
+P1 board + CLI · P2 PM/worker/reviewer loop · P3 merge-conflict PM + logs + verify · P4 Architect skills · P5 dogfood · P6 Architect-authored cards + `plan`/watch + `.env` on init — all done.

@@ -26,6 +26,8 @@ class BoardTests(unittest.TestCase):
             self.assertTrue((agents / name).is_file(), name)
         for column in ("not_started", "in_progress", "review", "blocked", "closed"):
             self.assertTrue((agents / "board" / column).is_dir(), column)
+        self.assertTrue((self.root / ".env").is_file())
+        self.assertIn("AI_ECONOMY_API_KEY=", (self.root / ".env").read_text())
 
     def test_find_project_root_walks_up(self):
         nested = self.root / "a" / "b"
