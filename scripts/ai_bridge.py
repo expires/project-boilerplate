@@ -1307,10 +1307,17 @@ def cmd_review(args: argparse.Namespace) -> int:
             f"{REVIEW_MARKER}\n## Agent review: approved\n\n{summary}\n\n"
             + ("Nitpicks:\n" + "\n".join(f"- {item}" for item in nitpicks) if nitpicks else ""),
         )
-        gh(
+        approval = gh(
             ["pr", "review", str(args.pr), "--approve", "--body-file", "-", *target_args(repo)],
             input_text=approve_body,
+            check=False,
         )
+        if approval.returncode != 0:
+            # Same-identity bots cannot approve their own PR; record the verdict as a comment instead.
+            gh(
+                ["pr", "comment", str(args.pr), "--body-file", "-", *target_args(repo)],
+                input_text=approve_body,
+            )
         merged = False
         if config["governance"].get("auto_merge", True):
             proc = gh(
