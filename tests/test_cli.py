@@ -100,6 +100,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("protected", err)
 
+    def test_status_json_shape(self):
+        code, out, _ = self.run_cli("status", "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(set(data), {"cards", "runner", "budget"})
+        self.assertFalse(data["runner"]["running"])
+
     def test_install_skill_writes_both(self):
         written = install_skill(self.root, project=True)
         self.assertEqual(len(written), 2)
@@ -107,6 +114,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(names, ["agents-add", "agents-init"])
         for path in written:
             self.assertTrue(path.is_file())
+        init_text = (self.root / ".claude" / "skills" / "agents-init" / "SKILL.md").read_text()
+        self.assertIn("agents run --detach", init_text)
+        self.assertIn("git commit", init_text)
+        self.assertIn("poll every", init_text.lower())
 
 
 if __name__ == "__main__":

@@ -5,10 +5,10 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, roles
+from . import __version__, roles, runner
 from .board import AGENTS_DIRNAME, COLUMNS, Board, BoardError, card_as_dict, find_project_root
 from .config import load_config, scaffold
-from .llm import load_dotenv
+from .llm import load_dotenv, load_usage
 from .logs import read_log
 from .orchestrator import Orchestrator
 from .skill import install_skill
@@ -133,6 +133,10 @@ def cmd_install_skill(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     root = _resolve_root(args)
     load_dotenv(root / ".env")
+    if args.detach:
+        pid = runner.start_detached(root, concurrency=args.concurrency)
+        print(f"runner started (pid {pid}); log: {runner.runner_state(root)['log']}")
+        return 0
     config = load_config(root)
     if args.concurrency:
         config["governance"]["max_concurrency"] = args.concurrency
@@ -142,17 +146,40 @@ def cmd_run(args: argparse.Namespace) -> int:
     return cmd_status(argparse.Namespace(root=str(root), json=False))
 
 
+def cmd_stop(args: argparse.Namespace) -> int:
+    root = _resolve_root(args)
+    stopped = runner.stop(root)
+    print("runner stopped" if stopped else "no active runner")
+    return 0
+
+
+def _budget(root: Path) -> dict:
+    config = load_config(root)
+    usage = load_usage(root)
+    return {
+        "spent_usd": round(float(usage.get("estimated_usd", 0.0)), 6),
+        "monthly_usd": config.get("cost_controls", {}).get("monthly_budget_usd"),
+    }
+
+
 def cmd_status(args: argparse.Namespace) -> int:
-    board = Board(_resolve_root(args))
+    root = _resolve_root(args)
+    board = Board(root)
     cards = board.cards()
     if args.json:
-        print(json.dumps([card_as_dict(card) for card in cards], indent=2))
+        payload = {"cards": [card_as_dict(card) for card in cards], "runner": runner.runner_state(root), "budget": _budget(root)}
+        print(json.dumps(payload, indent=2))
         return 0
     for column in COLUMNS:
         group = [card for card in cards if card.status == column]
         print(f"{column} ({len(group)})")
         for card in sorted(group, key=lambda item: (int(item.priority), item.id)):
             print(f"  {card.id}  {card.title}")
+    state = runner.runner_state(root)
+    label = f"running (pid {state['pid']})" if state["running"] else "stopped"
+    budget = _budget(root)
+    print(f"\nrunner: {label}")
+    print(f"budget: ${budget['spent_usd']:.4f} / ${budget['monthly_usd']}")
     return 0
 
 
@@ -224,8 +251,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="run the orchestrator loop (watch mode by default)")
     run.add_argument("--once", action="store_true", help="run a single tick and exit")
+    run.add_argument("--detach", action="store_true", help="start in the background (pidfile + log)")
     run.add_argument("--concurrency", type=int, help="override governance.max_concurrency")
     run.set_defaults(func=cmd_run)
+
+    stop = sub.add_parser("stop", help="stop a detached runner")
+    stop.set_defaults(func=cmd_stop)
 
     status = sub.add_parser("status", help="show the board")
     status.add_argument("--json", action="store_true")

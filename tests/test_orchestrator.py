@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agents import config, vcs
-from agents.board import Board
+from agents.board import Board, BoardError
 from agents.logs import read_log
 from agents.orchestrator import Orchestrator
 
@@ -64,6 +64,7 @@ class OrchestratorTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         config.scaffold(self.root, project_name="demo")
         vcs.ensure_repo(self.root, "main")
+        vcs.commit_all(self.root, "chore: init")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -104,6 +105,18 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("pm", llm.roles)
         self.assertIn("worker", llm.roles)
         self.assertIn("reviewer", llm.roles)
+
+    def test_requires_first_commit(self):
+        empty = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(empty, ignore_errors=True))
+        config.scaffold(empty, project_name="fresh")
+        vcs.ensure_repo(empty, "main")
+        board = Board(empty)
+        board.create("Do a thing")
+        llm = FakeLLM(pm="{}", worker="{}", reviewer=approve_response())
+        orch = Orchestrator(empty, config=config.load_config(empty), llm=llm)
+        with self.assertRaises(BoardError):
+            orch.tick()
 
     def test_decompose_disabled_ignores_spec(self):
         self.write_spec()

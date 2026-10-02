@@ -11,6 +11,8 @@ GITIGNORE_BLOCK = """# --- agent-board runtime state (board cards are committed;
 .agents/worktrees/
 .agents/logs/
 .agents/usage.json
+.agents/runner.log
+.agents/runner.pid
 .agents/board/.lock
 .agents/board/**/.tmp-*
 """

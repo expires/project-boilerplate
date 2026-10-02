@@ -156,6 +156,7 @@ class Orchestrator:
 
     def _work(self, card: Card) -> int:
         vcs.ensure_repo(self.root, self.base)
+        vcs.require_head(self.root)
         worktree = self.agents / "worktrees" / card.id
         branch = card.branch or f"{self.branch_prefix}{card.id.lower()}"
         vcs.worktree_remove(self.root, worktree)

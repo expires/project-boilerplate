@@ -36,8 +36,11 @@ def ensure_repo(root: Path, base: str) -> None:
         git(root, "init", "-b", base)
     ensure_identity(root)
     (root / AGENTS_DIRNAME).mkdir(exist_ok=True)
+
+
+def require_head(root: Path) -> None:
     if not has_head(root):
-        git(root, "commit", "--allow-empty", "-m", "chore: initialize")
+        raise BoardError("this repository has no commits yet; make a first commit before running the board")
 
 
 def branch_exists(root: Path, branch: str) -> bool:

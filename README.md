@@ -24,46 +24,49 @@ agents install-skill                                      # installs /agents-ini
 
 ## Use it — Claude Code only
 
-1. **Open Claude Code** in your project directory.
+You talk to Claude Code; it does the setup, starts the runner, queues the work, and monitors.
 
-2. **`/agents-init`** — Claude interviews you (project name/purpose, stack, conventions, definition of done, base branch), then:
-   - runs `agents init --name "…"`,
-   - writes `.agents/project.md` and updates `.agents/config.json`,
-   - tells you to start the runner.
+1. **Open Claude Code** in your project directory and run **`/agents-init`**.
 
-3. **Put your DeepSeek key in `.env`** (created by `init`, along with a `.gitignore`):
-   ```
-   AI_ECONOMY_API_KEY=sk-...
-   ```
+2. **Claude interviews you** (name/purpose, stack, conventions, definition of done, base
+   branch, initial features), then runs `agents init` (creating `.agents/`, `.env`, `.gitignore`),
+   writes `.agents/project.md`, and enables `verify` for your stack in `.agents/config.json`.
 
-4. **Start the runner once** and leave it running in a terminal:
+3. **Claude asks you to paste `AI_ECONOMY_API_KEY`** into `.env` and waits. It never prints the key.
+
+4. **Claude asks you to make the first commit** (it never commits for you):
    ```bash
-   agents run
+   git add -A && git commit -m "chore: init agent board"
    ```
+   It waits until the commit exists, then continues.
 
-5. **`/agents-add "<feature>"`** — describe a feature; Claude turns it into one or more task
-   cards (files, acceptance criteria, dependencies, priority). Repeat as you go, turn by turn.
+5. **Claude starts the runner detached** (`agents run --detach`) and **auto-queues the first
+   feature** it derived from the interview.
 
-6. **Ask Claude anything about the board** — "what's on the board?", "what's blocked?", "why
-   did T-004 fail?" Claude runs `agents status` / `agents card` / `agents logs` and reports.
-
-That's the whole loop: you talk to Claude Code, the runner does the work.
+6. **Then just keep talking.** Every feature you describe ("now add notes CRUD", "next, the
+   editor") is turned into task cards automatically via `/agents-add`. Ask "what's happening?"
+   any time and Claude reports the board.
 
 ## What Claude will and won't do
 
 | Will | Won't |
 |---|---|
-| Interview you and write the project brief | Write or edit application code |
-| Create and update task cards | Call the DeepSeek API |
-| Read board state and explain failures | Hand-edit files under `.agents/board/` |
-| Reset/reopen blocked cards for you | Push to any remote or touch GitHub |
+| Interview you, write the brief, scaffold the board | Write or edit application code |
+| Create/update task cards, start the runner, monitor | Call the DeepSeek API |
+| Read board state and explain failures | Commit for you — **you always commit** |
+| Reset/reopen blocked cards for you | Hand-edit `.agents/board/` or touch GitHub |
 
 ## The runner
 
+Claude starts it for you; these are the underlying commands.
+
 | Command | Purpose |
 |---|---|
-| `agents run` | Watch mode (default): loops PM → worker → reviewer. `Ctrl-C` to stop. |
+| `agents run --detach` | Start in the background (pidfile + `.agents/runner.log`). |
+| `agents run` | Run in watch mode in the foreground. `Ctrl-C` to stop. |
 | `agents run --once` | A single pass, then exit. |
+| `agents stop` | Stop the detached runner. |
+| `agents status` | Board columns, runner state, and budget spend. |
 
 The runner reads `AI_ECONOMY_API_KEY` from `.env`. It is the only thing that calls DeepSeek.
 
