@@ -165,7 +165,11 @@ def resolve_queue_conflict(config: dict[str, Any], branch: str) -> None:
     ours = json.loads(path.read_text())
     theirs_proc = factory_git("show", f"origin/{branch}:{relative}", check=False)
     if theirs_proc.returncode != 0:
-        raise BridgeError("queue persistence failed: could not read the remote queue for merging")
+        detail = theirs_proc.stderr.strip().splitlines()
+        raise BridgeError(
+            "queue persistence failed: could not read the remote queue for merging "
+            f"({detail[-1] if detail else 'unknown error'})"
+        )
     theirs = json.loads(theirs_proc.stdout or "{}")
     merged = merge_queues(ours, theirs)
     factory_git("reset", "--hard", f"origin/{branch}")
@@ -194,13 +198,20 @@ def persist_queue(config: dict[str, Any]) -> None:
         factory_git("fetch", "origin", branch, check=False)
         rebase = factory_git("pull", "--rebase", "origin", branch, check=False)
         if rebase.returncode != 0:
+            log(f"queue rebase failed: {rebase.stderr.strip()[:300]}")
             factory_git("rebase", "--abort", check=False)
             resolve_queue_conflict(config, branch)
         push = factory_git("push", "origin", f"HEAD:refs/heads/{branch}", check=False)
         if push.returncode == 0:
             log(f"queue persisted to {branch}")
             return
-        log(f"queue push rejected (attempt {attempt + 1}/3); retrying")
+        lines = [line.strip(" \t") for line in (push.stderr or push.stdout).splitlines() if line.strip()]
+        reason = next((line for line in reversed(lines) if line.startswith("remote:")), None)
+        if reason is None:
+            reason = next((line for line in reversed(lines) if "remote rejected" in line), None)
+        if reason is None:
+            reason = lines[-1] if lines else "unknown error"
+        log(f"queue push rejected (attempt {attempt + 1}/3): {reason}")
     raise BridgeError("queue persistence failed after 3 push attempts")
 
 

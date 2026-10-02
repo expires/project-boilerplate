@@ -195,7 +195,7 @@ Model routing is human-owned. Agents themselves never see or publish model ident
 | schedule / dispatch `pump` | `claim` → `workers` | Claims ≤ 2 tasks; workers clone Repo B into `app-workspace` and open PRs there |
 | dispatch `status` / `requeue` / schedule | `maintenance` | Lease recovery, queue report |
 
-Queue-writing jobs share the concurrency group `ai-queue-<repo>` so claims can never race. Every dirty queue transaction is committed and pushed back to the factory repo by the bridge (`AI_BRIDGE_PERSIST=1` in Actions), which is how `pm-plan` → `claim` → `workers` → `review` share state across runs. Repo B must provide its own CI workflow (or use `init --with-ci`) so the reviewer's `gh pr checks` gate has results to read.
+Queue-writing jobs share the concurrency group `ai-queue-<repo>` so claims can never race. Every dirty queue transaction is committed and pushed back to the factory repo by the bridge (`AI_BRIDGE_PERSIST=1` in Actions); those commits authenticate with the workflow's `GITHUB_TOKEN`, so queue persistence is independent of `AI_BRIDGE_PAT` scoping. This is how `pm-plan` → `claim` → `workers` → `review` share state across runs. Repo B must provide its own CI workflow (or use `init --with-ci`) so the reviewer's `gh pr checks` gate has results to read.
 
 ## Cost Model
 
