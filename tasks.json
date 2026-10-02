@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "master_spec_issue": null,
+  "updated_at": null,
+  "tasks": [],
+  "_template": {
+    "id": "T-001",
+    "title": "Short imperative task title",
+    "status": "pending",
+    "agent_label": "agent:backend",
+    "depth": 1,
+    "spec": "What to implement, written for a worker with no repo context.",
+    "acceptance_criteria": [
+      "Observable, testable condition 1"
+    ],
+    "files": [
+      "src/example.py"
+    ],
+    "allowed_paths": [
+      "src/**"
+    ],
+    "depends_on": [],
+    "priority": 1,
+    "attempts": 0,
+    "review_cycles": 0,
+    "pr": null,
+    "branch": null,
+    "lease_until": null,
+    "last_review": null,
+    "created_at": null,
+    "updated_at": null,
+    "history": []
+  }
+}
