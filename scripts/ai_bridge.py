@@ -179,6 +179,19 @@ def resolve_queue_conflict(config: dict[str, Any], branch: str) -> None:
     log("queue conflict resolved by merging task states")
 
 
+def sync_queue_checkout(config: dict[str, Any]) -> None:
+    if os.environ.get("AI_BRIDGE_PERSIST", "") != "1":
+        return
+    branch = os.environ.get("AI_BRIDGE_QUEUE_REF", "").strip()
+    if not branch:
+        return
+    if factory_git("fetch", "origin", branch, check=False).returncode != 0:
+        log("queue sync skipped: could not fetch the remote queue")
+        return
+    if factory_git("merge", "--ff-only", "FETCH_HEAD", check=False).returncode != 0:
+        log("queue sync skipped: local checkout diverged; persistence will merge")
+
+
 def persist_queue(config: dict[str, Any]) -> None:
     if os.environ.get("AI_BRIDGE_PERSIST", "") != "1":
         return
@@ -227,6 +240,7 @@ def app_root(config: dict[str, Any]) -> Path:
 
 
 def read_queue(config: dict[str, Any]) -> dict[str, Any]:
+    sync_queue_checkout(config)
     path = queue_path(config)
     if not path.exists():
         return {"version": 1, "tasks": []}
@@ -278,6 +292,7 @@ def queue_txn(config: dict[str, Any]) -> Iterator[QueueTransaction]:
     handle = open(lock_path, "w")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX)
+        sync_queue_checkout(config)
         if path.exists():
             try:
                 data = json.loads(path.read_text())
@@ -669,6 +684,11 @@ def ensure_ci_green(config: dict[str, Any], pr_number: int, repo: str | None) ->
         ["pr", "checks", str(pr_number), "--json", "name,state,bucket", *target_args(repo)],
         check=False,
     )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise CiNotGreen(
+            f"PR #{pr_number}: could not read CI checks ({detail[-1] if detail else 'unknown gh error'})"
+        )
     try:
         checks = json.loads(proc.stdout or "[]")
     except json.JSONDecodeError:
