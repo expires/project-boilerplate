@@ -32,11 +32,8 @@ permissions:
 env:
   PYTHONUNBUFFERED: "1"
   GH_TOKEN: ${{ secrets.AI_BRIDGE_PAT || secrets.GITHUB_TOKEN }}
-  AI_PREMIUM_API_KEY: ${{ secrets.AI_PREMIUM_API_KEY }}
   AI_ECONOMY_API_KEY: ${{ secrets.AI_ECONOMY_API_KEY }}
-  AI_PREMIUM_BASE_URL: ${{ vars.AI_PREMIUM_BASE_URL }}
   AI_ECONOMY_BASE_URL: ${{ vars.AI_ECONOMY_BASE_URL }}
-  ARCHITECT_MODEL: ${{ vars.ARCHITECT_MODEL }}
   PM_MODEL: ${{ vars.PM_MODEL }}
   WORKER_MODEL: ${{ vars.WORKER_MODEL }}
   REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}
@@ -50,8 +47,8 @@ jobs:
       cancel-in-progress: false
     if: |
       (github.event_name == 'issues'
-        && contains(github.event.issue.labels.*.name, 'master-spec')
-        && (github.event.action != 'labeled' || github.event.label.name == 'master-spec')
+        && contains(github.event.issue.labels.*.name, 'type:master-spec')
+        && (github.event.action != 'labeled' || github.event.label.name == 'type:master-spec')
         && github.actor != 'github-actions[bot]'
         && !startsWith(github.actor, 'dependabot'))
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'plan')

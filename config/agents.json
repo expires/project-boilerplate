@@ -20,7 +20,7 @@
     "max_output_tokens_per_call": 8000,
     "max_input_chars": 48000,
     "max_pr_diff_lines": 600,
-    "allow_premium_in_worker": false
+    "restrict_worker_to_economy": true
   },
   "context": {
     "max_files_per_task": 8,
@@ -31,6 +31,7 @@
       "config/agents.json",
       "scripts/ai_bridge.py",
       "tasks.json",
+      "CLAUDE.md",
       ".git/**",
       ".env",
       ".env.*",
@@ -67,7 +68,7 @@
     ]
   },
   "labels": {
-    "master_spec": "master-spec",
+    "master_spec": "type:master-spec",
     "planned": "spec:planned",
     "auto_pr": "agent:auto",
     "escalation": "escalation",
@@ -94,18 +95,12 @@
     "commit_prefix": "feat(agent)"
   },
   "roles": {
-    "architect": {
-      "provider": "premium",
-      "model_env": "ARCHITECT_MODEL",
-      "model_default": "gpt-4.1",
-      "temperature": 0.2,
-      "max_output_tokens": 4000,
-      "timeout_seconds": 180
-    },
     "pm": {
       "provider": "economy",
       "model_env": "PM_MODEL",
       "model_default": "deepseek-chat",
+      "fallback_provider": "economy",
+      "fallback_model_default": "deepseek-chat",
       "temperature": 0.2,
       "max_output_tokens": 4000,
       "timeout_seconds": 180
@@ -113,26 +108,25 @@
     "worker": {
       "provider": "economy",
       "model_env": "WORKER_MODEL",
-      "model_default": "deepseek-chat",
+      "model_default": "deepseek-coder",
+      "fallback_provider": "economy",
+      "fallback_model_default": "deepseek-chat",
       "temperature": 0.1,
       "max_output_tokens": 8000,
       "timeout_seconds": 300
     },
     "reviewer": {
-      "provider": "premium",
+      "provider": "economy",
       "model_env": "REVIEWER_MODEL",
-      "model_default": "gpt-4.1-mini",
+      "model_default": "deepseek-chat",
+      "fallback_provider": "economy",
+      "fallback_model_default": "deepseek-chat",
       "temperature": 0.0,
       "max_output_tokens": 3000,
       "timeout_seconds": 180
     }
   },
   "providers": {
-    "premium": {
-      "base_url_env": "AI_PREMIUM_BASE_URL",
-      "base_url_default": "https://api.openai.com/v1",
-      "api_key_env": "AI_PREMIUM_API_KEY"
-    },
     "economy": {
       "base_url_env": "AI_ECONOMY_BASE_URL",
       "base_url_default": "https://api.deepseek.com/v1",
@@ -140,10 +134,6 @@
     }
   },
   "pricing": {
-    "premium": {
-      "input_per_1k_usd": 0.002,
-      "output_per_1k_usd": 0.008
-    },
     "economy": {
       "input_per_1k_usd": 0.00014,
       "output_per_1k_usd": 0.00028

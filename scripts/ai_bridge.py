@@ -63,6 +63,20 @@ def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -255,9 +269,8 @@ def check_budget(config: dict[str, Any]) -> None:
         raise BudgetHalted(f"monthly LLM budget exhausted: ${spent:.4f} / ${budget:.2f}")
 
 
-def record_usage(config: dict[str, Any], role: str, usage: dict[str, Any]) -> None:
+def record_usage(config: dict[str, Any], role: str, provider_name: str, usage: dict[str, Any]) -> None:
     data = load_usage()
-    provider_name = config["roles"][role].get("provider", "economy")
     pricing = config.get("pricing", {}).get(provider_name, {})
     input_tokens = int(usage.get("prompt_tokens") or 0)
     output_tokens = int(usage.get("completion_tokens") or 0)
@@ -277,16 +290,36 @@ def record_usage(config: dict[str, Any], role: str, usage: dict[str, Any]) -> No
     save_usage(data)
 
 
-def resolve_route(config: dict[str, Any], role: str) -> tuple[dict[str, Any], dict[str, Any], str, str, str]:
+def resolve_route(
+    config: dict[str, Any], role: str
+) -> tuple[dict[str, Any], str, dict[str, Any], str, str, str]:
     roles = config.get("roles", {})
     if role not in roles:
         raise BridgeError(f"unknown role: {role}")
     route = roles[role]
-    provider = config.get("providers", {}).get(route.get("provider"), {})
-    base_url = (os.environ.get(provider.get("base_url_env", "")) or provider.get("base_url_default", "")).rstrip("/")
+    provider_name = route.get("provider", "economy")
+    provider = config.get("providers", {}).get(provider_name, {})
     api_key = os.environ.get(provider.get("api_key_env", ""), "")
     model = os.environ.get(route.get("model_env", "")) or route.get("model_default", "")
-    return route, provider, base_url, api_key, model
+    if not api_key:
+        fallback_name = route.get("fallback_provider", "economy")
+        fallback = config.get("providers", {}).get(fallback_name, {})
+        fallback_key = os.environ.get(fallback.get("api_key_env", ""), "")
+        if fallback_key:
+            log(
+                f"role '{role}': {provider.get('api_key_env') or 'primary key'} is empty; "
+                f"falling back to '{fallback_name}'"
+            )
+            provider_name = fallback_name
+            provider = fallback
+            api_key = fallback_key
+            model = (
+                os.environ.get(route.get("fallback_model_env", ""))
+                or route.get("fallback_model_default")
+                or model
+            )
+    base_url = (os.environ.get(provider.get("base_url_env", "")) or provider.get("base_url_default", "")).rstrip("/")
+    return route, provider_name, provider, base_url, api_key, model
 
 
 def call_llm(
@@ -297,17 +330,21 @@ def call_llm(
     dry_run: bool = False,
 ) -> str:
     global CALLS_THIS_RUN
-    route, provider, base_url, api_key, model = resolve_route(config, role)
-    if route.get("provider") == "premium" and role == "worker" and not config["cost_controls"].get(
-        "allow_premium_in_worker", False
+    route, provider_name, provider, base_url, api_key, model = resolve_route(config, role)
+    if (
+        role == "worker"
+        and provider_name != "economy"
+        and config["cost_controls"].get("restrict_worker_to_economy", True)
     ):
-        raise BridgeError("worker role must use an economy provider (cost_controls.allow_premium_in_worker=false)")
+        raise BridgeError(
+            "worker role must use the economy provider (cost_controls.restrict_worker_to_economy=true)"
+        )
     max_input = int(config["cost_controls"].get("max_input_chars", 48000))
     if len(system_prompt) + len(user_prompt) > max_input:
         user_prompt = user_prompt[: max(0, max_input - len(system_prompt))]
         log("input truncated to cost_controls.max_input_chars")
     if dry_run:
-        log(f"[dry-run] role={role} provider={route.get('provider')} model={model or 'unset'}")
+        log(f"[dry-run] role={role} provider={provider_name} model={model or 'unset'}")
         log("[dry-run] system prompt:\n" + system_prompt)
         log("[dry-run] user prompt:\n" + user_prompt)
         return '{"dry_run": true}'
@@ -350,7 +387,7 @@ def call_llm(
     if not text:
         raise BridgeError("LLM returned empty content")
     CALLS_THIS_RUN += 1
-    record_usage(config, role, body.get("usage", {}))
+    record_usage(config, role, provider_name, body.get("usage", {}))
     return text
 
 
@@ -712,7 +749,7 @@ def escalation_body(config: dict[str, Any], task: dict[str, Any], reason: str) -
 
 ### Required action
 The pipeline will **not** retry this task automatically. The Architect must re-scope, split, or clarify it,
-then update the Master Spec and re-apply the `master-spec` label (or open a new spec issue).
+then update the Master Spec and re-apply the `type:master-spec` label (or open a new spec issue).
 """
 
 
@@ -1199,6 +1236,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv(ROOT / ".env")
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

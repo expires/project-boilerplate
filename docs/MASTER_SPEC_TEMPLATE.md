@@ -1,7 +1,8 @@
 # Master Spec: <Feature Name>
 
-> Stakeholder: file this as a GitHub Issue, apply the `master-spec` label, and stop there.
-> The Architect owns this document; the PM reads it and writes `tasks.json`; workers never see this issue.
+> Local Architect (Claude Code): fill this in, create the issue with
+> `gh issue create --body-file <spec>.md --label type:master-spec`, and stop there.
+> The PM reads this issue and writes `tasks.json`; workers never see this issue.
 
 ## 1. Stakeholder Request
 
@@ -70,10 +71,10 @@ The PM may deviate, but each item should become one PR-sized task with exact fil
 
 ---
 
-### Architect Checklist Before Labeling
+### Architect Checklist Before Creating the Issue
 
 - [ ] Acceptance criteria are testable, not aspirational
 - [ ] Affected paths are listed and PR-sized
 - [ ] No task requires more than 8 files or 600 changed lines
 - [ ] Dependencies form a DAG with no cycles
-- [ ] No task modifies protected paths (`.github/workflows/**`, `config/agents.json`, `scripts/ai_bridge.py`, `tasks.json`, secrets)
+- [ ] No task modifies protected paths (`.github/workflows/**`, `config/agents.json`, `scripts/ai_bridge.py`, `tasks.json`, `CLAUDE.md`, secrets)
