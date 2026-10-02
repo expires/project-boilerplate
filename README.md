@@ -195,7 +195,7 @@ Model routing is human-owned. Agents themselves never see or publish model ident
 | schedule / dispatch `pump` | `claim` → `workers` | Claims ≤ 2 tasks; workers clone Repo B into `app-workspace` and open PRs there |
 | dispatch `status` / `requeue` / schedule | `maintenance` | Lease recovery, queue report |
 
-Queue-writing jobs share the concurrency group `ai-queue-<repo>` so claims can never race. Repo B must provide its own CI workflow (or use `init --with-ci`) so the reviewer's `gh pr checks` gate has results to read.
+Queue-writing jobs share the concurrency group `ai-queue-<repo>` so claims can never race. Every dirty queue transaction is committed and pushed back to the factory repo by the bridge (`AI_BRIDGE_PERSIST=1` in Actions), which is how `pm-plan` → `claim` → `workers` → `review` share state across runs. Repo B must provide its own CI workflow (or use `init --with-ci`) so the reviewer's `gh pr checks` gate has results to read.
 
 ## Cost Model
 
@@ -222,6 +222,7 @@ scripts/ai_bridge.py                     orchestration engine (stdlib only)
 ## Known Constraints
 
 - Autonomous chaining requires `AI_BRIDGE_PAT`; without it, PRs opened by `github-actions[bot]` will not trigger CI/review workflows. Manual `workflow_dispatch` still works.
+- Queue persistence pushes `tasks.json` to the factory branch on every mutation (up to 3 rebase/push retries). Parallel workers can briefly contend on the file; a rebase conflict fails the run loudly rather than losing state.
 - The factory workflow cannot listen to `pull_request` events in Repo B, so agent reviews run from the scheduled sweep (every 20 minutes) or an explicit dispatch. Repo B CI still gates the review itself.
 - Repo B must expose CI checks; otherwise the reviewer refuses to run (`no CI checks found`). Use `init --with-ci` for a starter workflow.
 - Budget accounting via `actions/cache` is best-effort (GitHub evicts caches); mirror usage for strict accounting.

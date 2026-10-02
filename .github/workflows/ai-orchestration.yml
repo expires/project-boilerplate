@@ -34,6 +34,8 @@ env:
   GH_TOKEN: ${{ secrets.AI_BRIDGE_PAT || secrets.GITHUB_TOKEN }}
   TARGET_REPO: ${{ vars.TARGET_REPO }}
   AI_BRIDGE_APP_DIR: app-workspace
+  AI_BRIDGE_PERSIST: "1"
+  AI_BRIDGE_QUEUE_REF: ${{ github.ref_name }}
   AI_ECONOMY_API_KEY: ${{ secrets.AI_ECONOMY_API_KEY }}
   AI_ECONOMY_BASE_URL: ${{ vars.AI_ECONOMY_BASE_URL }}
   PM_MODEL: ${{ vars.PM_MODEL }}

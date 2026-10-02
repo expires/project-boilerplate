@@ -127,6 +127,83 @@ def queue_path(config: dict[str, Any]) -> Path:
     return ROOT / config["governance"].get("queue_file", "tasks.json")
 
 
+def factory_git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return run_cmd(["git", "-C", str(ROOT), *args], check=check)
+
+
+def ensure_factory_identity() -> None:
+    for key, value in (("user.name", "AI Bridge"), ("user.email", "ai-bridge@users.noreply.github.com")):
+        probe = factory_git("config", key, check=False)
+        if probe.returncode != 0:
+            factory_git("config", key, value)
+
+
+def merge_queues(ours: dict[str, Any], theirs: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(theirs)
+    merged.setdefault("tasks", [])
+    mine_by_id = {task.get("id"): task for task in ours.get("tasks", [])}
+    result: list[dict[str, Any]] = []
+    for task in merged["tasks"]:
+        mine = mine_by_id.pop(task.get("id"), None)
+        if mine is None:
+            result.append(task)
+            continue
+        mine_time = parse_iso(mine.get("updated_at"))
+        their_time = parse_iso(task.get("updated_at"))
+        result.append(mine if (mine_time and (not their_time or mine_time > their_time)) else task)
+    result.extend(mine_by_id.values())
+    merged["tasks"] = result
+    ours_master = ours.get("master_spec_issue")
+    merged["master_spec_issue"] = ours_master if ours_master is not None else merged.get("master_spec_issue")
+    merged["updated_at"] = iso(now())
+    return merged
+
+
+def resolve_queue_conflict(config: dict[str, Any], branch: str) -> None:
+    path = queue_path(config)
+    relative = str(path.relative_to(ROOT))
+    ours = json.loads(path.read_text())
+    theirs_proc = factory_git("show", f"origin/{branch}:{relative}", check=False)
+    if theirs_proc.returncode != 0:
+        raise BridgeError("queue persistence failed: could not read the remote queue for merging")
+    theirs = json.loads(theirs_proc.stdout or "{}")
+    merged = merge_queues(ours, theirs)
+    factory_git("reset", "--hard", f"origin/{branch}")
+    path.write_text(json.dumps(merged, indent=2) + "\n")
+    factory_git("add", "--", relative)
+    factory_git("commit", "-m", "chore(queue): sync tasks.json (merged)")
+    log("queue conflict resolved by merging task states")
+
+
+def persist_queue(config: dict[str, Any]) -> None:
+    if os.environ.get("AI_BRIDGE_PERSIST", "") != "1":
+        return
+    path = queue_path(config)
+    relative = str(path.relative_to(ROOT))
+    branch = os.environ.get("AI_BRIDGE_QUEUE_REF", "").strip()
+    if not branch:
+        branch = factory_git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if not branch or branch == "HEAD":
+        raise BridgeError("cannot determine the factory branch for queue persistence")
+    ensure_factory_identity()
+    factory_git("add", "--", relative)
+    if factory_git("diff", "--cached", "--quiet", check=False).returncode == 0:
+        return
+    factory_git("commit", "-m", "chore(queue): sync tasks.json")
+    for attempt in range(3):
+        factory_git("fetch", "origin", branch, check=False)
+        rebase = factory_git("pull", "--rebase", "origin", branch, check=False)
+        if rebase.returncode != 0:
+            factory_git("rebase", "--abort", check=False)
+            resolve_queue_conflict(config, branch)
+        push = factory_git("push", "origin", f"HEAD:refs/heads/{branch}", check=False)
+        if push.returncode == 0:
+            log(f"queue persisted to {branch}")
+            return
+        log(f"queue push rejected (attempt {attempt + 1}/3); retrying")
+    raise BridgeError("queue persistence failed after 3 push attempts")
+
+
 def app_root(config: dict[str, Any]) -> Path:
     env_name = config.get("target", {}).get("app_dir_env", "AI_BRIDGE_APP_DIR")
     explicit = os.environ.get(env_name, "").strip()
@@ -205,6 +282,7 @@ def queue_txn(config: dict[str, Any]) -> Iterator[QueueTransaction]:
             tmp = path.with_name(path.name + ".tmp")
             tmp.write_text(json.dumps(data, indent=2) + "\n")
             os.replace(tmp, path)
+            persist_queue(config)
     finally:
         fcntl.flock(handle, fcntl.LOCK_UN)
         handle.close()
