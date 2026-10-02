@@ -57,4 +57,4 @@ agents status
 
 ## Roadmap
 
-P1 board + CLI (done) · P2 PM/worker/reviewer loop · P3 merge-conflict PM + budget · P4 Architect skill · P5 dogfood.
+P1 board + CLI · P2 PM/worker/reviewer loop · P3 merge-conflict PM + logs + verify · P4 Architect skill · P5 dogfood — all done.

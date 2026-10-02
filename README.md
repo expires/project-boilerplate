@@ -62,7 +62,12 @@ agents add "Add hello.py and its pytest"
 agents status
 ```
 
-The Architect skill (Claude Code) wraps `init` and `add` with an interview so you never have to hand-write the brief. Until the skill ships, drive the CLI directly.
+Start the daemon in one terminal and let Claude be the Architect in another:
+
+```bash
+agents run            # PM -> workers -> reviewer, forever
+agents run --once     # a single tick
+```
 
 ## CLI
 
@@ -74,6 +79,30 @@ The Architect skill (Claude Code) wraps `init` and `add` with an interview so yo
 | `agents status [--json]` | print the board |
 | `agents card <id> [--json]` | show one card |
 | `agents move <id> --to <column> [--note N]` | move a card between columns |
+| `agents logs <id>` | show a card's event log |
+| `agents retry <id>` | reopen a card for another worker attempt |
+| `agents unblock <id>` | reopen a blocked card and reset review cycles |
+| `agents install-skill [--project]` | install the Architect skill for Claude Code |
+
+## Architect skill (Claude Code)
+
+```bash
+agents install-skill            # -> ~/.claude/skills/agent-board/SKILL.md
+```
+
+Then, in Claude Code inside a project, `/agents-init` interviews you and scaffolds the
+board, and `/agents-add "<feature>"` queues work. The skill never writes application code
+and never calls the model API — it plans, the local daemon builds.
+
+## Optional verification
+
+The reviewer is the only quality gate by default. If you want a deterministic check before
+review, enable it in `.agents/config.json` (commands run by the trusted orchestrator, never
+the model):
+
+```json
+"verify": { "enabled": true, "commands": ["python -m pytest -q", "ruff check ."] }
+```
 
 ## Role contracts
 
@@ -94,12 +123,13 @@ The CLI locates the nearest `.agents/` from the current directory and reads only
 
 **P1:** package, board model, CLI (`init/add/status/card/move`), project discovery.
 
-**P2 (current):** PM decomposition, worker via git worktree, reviewer, full close loop, budget accounting, `agents run`.
+**P2:** PM decomposition, worker via git worktree, reviewer, full close loop, budget accounting, `agents run`.
 
-**Next:**
-- **P3** — PM merge/conflict resolution, circuit breaker polish, optional `verify` commands.
-- **P4** — Claude Code Architect skill, docs.
-- **P5** — dogfood on a throwaway repo.
+**P3:** PM-assisted merge-conflict resolution, per-card logs, optional `verify` commands, `retry`/`unblock`.
+
+**P4:** Claude Code Architect skill (`agents install-skill`).
+
+**P5 (current):** dogfood on a throwaway repo.
 
 ## Development
 

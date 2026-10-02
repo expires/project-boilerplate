@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agents import config, vcs
 from agents.board import Board
+from agents.logs import read_log
 from agents.orchestrator import Orchestrator
 
 
@@ -39,7 +40,7 @@ class FakeLLM:
     def __call__(self, config_dict, root, role, system, user):
         self.roles.append(role)
         if role == "pm":
-            return self.pm
+            return self.pm(config_dict, root, user) if callable(self.pm) else self.pm
         if role == "worker":
             return self.worker(config_dict, root, user) if callable(self.worker) else self.worker
         if role == "reviewer":
@@ -155,6 +156,68 @@ class OrchestratorTests(unittest.TestCase):
         Orchestrator(self.root, llm=llm).run()
         self.assertEqual(Board(self.root).cards(), [])
         self.assertTrue((self.root / ".agents" / "specs" / "failed" / "spec.md").is_file())
+
+    def test_conflict_resolution(self):
+        self.write_spec()
+
+        def pm(config_dict, root, user):
+            if "resolved file contents" in user:
+                return json.dumps({"files": [{"path": "hello.py", "content": "merged\n"}]})
+            return pm_response(
+                [
+                    one_task(key="1", title="First writer", files=["hello.py"]),
+                    one_task(key="2", title="Second writer", files=["hello.py"]),
+                ]
+            )
+
+        def worker(config_dict, root, user):
+            match = re.search(r"TASK (T-\d+)", user)
+            return json.dumps(
+                {"summary": "done", "files": [{"path": "hello.py", "content": f"{match.group(1)}\n"}]}
+            )
+
+        llm = FakeLLM(pm=pm, worker=worker, reviewer=approve_response())
+        Orchestrator(self.root, llm=llm).run()
+        board = Board(self.root)
+        self.assertEqual(board.find("T-001").status, "closed")
+        self.assertEqual(board.find("T-002").status, "closed")
+        self.assertEqual((self.root / "hello.py").read_text(), "merged\n")
+
+    def test_verify_failure_blocks(self):
+        self.write_spec()
+        cfg = config.load_config(self.root)
+        cfg["verify"] = {"enabled": True, "commands": ["python3 -c \"import sys; sys.exit(1)\""]}
+        llm = FakeLLM(
+            pm=pm_response([one_task()]),
+            worker=json.dumps({"summary": "done", "files": [{"path": "hello.py", "content": "x\n"}]}),
+            reviewer=approve_response(),
+        )
+        Orchestrator(self.root, config=cfg, llm=llm).run()
+        self.assertEqual(Board(self.root).find("T-001").status, "blocked")
+
+    def test_verify_success_closes(self):
+        self.write_spec()
+        cfg = config.load_config(self.root)
+        cfg["verify"] = {"enabled": True, "commands": ["python3 -c \"print('ok')\""]}
+        llm = FakeLLM(
+            pm=pm_response([one_task()]),
+            worker=json.dumps({"summary": "done", "files": [{"path": "hello.py", "content": "x\n"}]}),
+            reviewer=approve_response(),
+        )
+        Orchestrator(self.root, config=cfg, llm=llm).run()
+        self.assertEqual(Board(self.root).find("T-001").status, "closed")
+
+    def test_card_log_written(self):
+        self.write_spec()
+        llm = FakeLLM(
+            pm=pm_response([one_task()]),
+            worker=json.dumps({"summary": "done", "files": [{"path": "hello.py", "content": "x\n"}]}),
+            reviewer=approve_response(),
+        )
+        Orchestrator(self.root, llm=llm).run()
+        log = read_log(self.root, "T-001")
+        self.assertIn("worker started", log)
+        self.assertIn("review verdict: approve", log)
 
     def test_dependency_ordering(self):
         self.write_spec()

@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import roles, vcs
+from . import roles, shell, vcs
 from .board import AGENTS_DIRNAME, Board, BoardError, Card, log
 from .config import load_config
+from .logs import log_event
 from .validate import changed_line_count, is_protected, safe_path
 
 
@@ -121,14 +122,33 @@ class Orchestrator:
             raise BoardError("worker produced no changes")
         return writes
 
+    def _verify(self, card: Card, worktree: Path) -> None:
+        verify = self.config.get("verify", {})
+        commands = list(verify.get("commands") or [])
+        if not verify.get("enabled") or not commands:
+            return
+        results = shell.run_commands(worktree, commands)
+        for result in results:
+            log_event(self.root, card.id, f"verify ok ({result['command']})")
+            if result["output"].strip():
+                log_event(self.root, card.id, result["output"].strip())
+
     def _fail_card(self, card: Card, reason: str) -> None:
         attempts = int(card.attempts) + 1
         max_attempts = int(self.config["governance"].get("max_task_attempts", 2))
         self.board.update(card.id, attempts=attempts)
+        log_event(self.root, card.id, f"attempt {attempts}/{max_attempts} failed: {reason}")
         if attempts >= max_attempts:
             self.board.move(card.id, "blocked", note=f"failed: {reason}")
         else:
             self.board.move(card.id, "not_started", note=f"retry {attempts}/{max_attempts}: {reason}")
+
+    def _resolver(self, card: Card, base: str, branch: str):
+        def resolve(conflicts: dict[str, str]) -> dict[str, str]:
+            log_event(self.root, card.id, f"resolving {len(conflicts)} conflict(s) on {branch}")
+            return roles.resolve_conflicts(self.config, self.root, base, branch, conflicts, self.llm)
+
+        return resolve
 
     def _work(self, card: Card) -> int:
         vcs.ensure_repo(self.root, self.base)
@@ -136,6 +156,7 @@ class Orchestrator:
         branch = card.branch or f"{self.branch_prefix}{card.id.lower()}"
         vcs.worktree_remove(self.root, worktree)
         try:
+            log_event(self.root, card.id, f"worker started on {branch}")
             vcs.worktree_add(self.root, worktree, branch, self.base)
             context = self._context(card, worktree)
             payload = roles.worker_propose(self.config, self.root, card, context, self._feedback(card), self.llm)
@@ -143,11 +164,13 @@ class Orchestrator:
             for target, content in writes:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content)
+            self._verify(card, worktree)
             commit = vcs.commit_all(worktree, f"{self.commit_prefix}: {card.id} {card.title}")
             if commit is None:
                 raise BoardError("worker produced no changes")
             self.board.update(card.id, branch=branch, attempts=int(card.attempts) + 1)
             self.board.move(card.id, "review", note="worker produced changes")
+            log_event(self.root, card.id, f"committed {len(writes)} file(s) to {branch}")
             log(f"{card.id}: {len(writes)} file(s) committed to {branch}")
             return 1
         except BoardError as exc:
@@ -171,13 +194,17 @@ class Orchestrator:
             log(f"{card.id} review failed: {exc}")
             self._fail_card(card, str(exc))
             return 1
+        log_event(self.root, card.id, f"review verdict: {verdict['verdict']} ({verdict['summary']})")
         if verdict["verdict"] == "approve":
-            if vcs.integrate(self.root, self.base, card.branch):
+            resolver = self._resolver(card, self.base, card.branch)
+            if vcs.integrate(self.root, self.base, card.branch, resolver):
                 self.board.move(card.id, "closed", note="review approved and merged")
                 vcs.delete_branch(self.root, card.branch)
+                log_event(self.root, card.id, f"merged into {self.base}")
                 log(f"{card.id}: approved and merged")
             else:
                 self.board.move(card.id, "blocked", note="merge conflict; needs resolution")
+                log_event(self.root, card.id, "merge conflict unresolved")
                 log(f"{card.id}: merge conflict")
             return 1
         cycles = int(card.review_cycles) + 1

@@ -57,6 +57,19 @@ __FEEDBACK__
 
 Return the complete file contents as JSON."""
 
+CONFLICT_SYSTEM = """You are the Project Manager resolving a git rebase conflict.
+Branch __BRANCH__ is being rebased onto __BASE__. Each file below contains conflict markers.
+Hard rules:
+- Return STRICT JSON only: {"files": [{"path": "...", "content": "..."}]}.
+- Provide the FULL resolved content for every conflicted file (no markers, no patches).
+- Preserve the intent of both sides where possible. Add no commentary.
+"""
+
+CONFLICT_USER = """Conflicted files:
+__FILES__
+
+Return the resolved file contents as JSON."""
+
 REVIEWER_USER = """TASK __ID__: __TITLE__
 
 Acceptance criteria:

@@ -136,6 +136,31 @@ def worker_propose(
     return payload
 
 
+def resolve_conflicts(
+    config: dict[str, Any],
+    root: Path,
+    base: str,
+    branch: str,
+    conflicts: dict[str, str],
+    llm: LLM | None = None,
+) -> dict[str, str]:
+    if not conflicts:
+        return {}
+    chunks = [f"### {path}\n{content}" for path, content in conflicts.items()]
+    system = _fill(prompts.CONFLICT_SYSTEM, BRANCH=branch, BASE=base)
+    user = _fill(prompts.CONFLICT_USER, FILES="\n\n".join(chunks))
+    raw = (llm or default_llm)(config, root, "pm", system, user)
+    payload = extract_json(raw)
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, list):
+        return {}
+    resolved: dict[str, str] = {}
+    for item in files:
+        if isinstance(item, dict) and item.get("path") and isinstance(item.get("content"), str):
+            resolved[str(item["path"])] = item["content"]
+    return resolved
+
+
 def reviewer_verdict(
     config: dict[str, Any],
     root: Path,

@@ -9,7 +9,9 @@ from . import __version__
 from .board import AGENTS_DIRNAME, COLUMNS, Board, BoardError, card_as_dict, find_project_root, slugify, utcnow
 from .config import load_config, scaffold
 from .llm import load_dotenv
+from .logs import read_log
 from .orchestrator import Orchestrator
+from .skill import install_skill
 
 
 def _resolve_root(args: argparse.Namespace) -> Path:
@@ -65,6 +67,15 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install_skill(args: argparse.Namespace) -> int:
+    project = bool(args.project)
+    root = (Path(args.root).resolve() if args.root else Path.cwd()) if project else None
+    destination = install_skill(root, project=project)
+    scope = "project" if project else "user"
+    print(f"installed agent-board skill ({scope}): {destination}")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     root = _resolve_root(args)
     load_dotenv(root / ".env")
@@ -104,6 +115,34 @@ def cmd_move(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_logs(args: argparse.Namespace) -> int:
+    text = read_log(_resolve_root(args), args.card_id)
+    if not text:
+        print(f"no log for {args.card_id}", file=sys.stderr)
+        return 1
+    print(text, end="")
+    return 0
+
+
+def _reopen(args: argparse.Namespace, reset_review: bool) -> int:
+    board = Board(_resolve_root(args))
+    fields = {"attempts": 0, "blocking_issues": [], "last_review_summary": ""}
+    if reset_review:
+        fields["review_cycles"] = 0
+    board.update(args.card_id, **fields)
+    card = board.move(args.card_id, "not_started", note="manually reopened")
+    print(f"{card.id} -> {card.status}")
+    return 0
+
+
+def cmd_retry(args: argparse.Namespace) -> int:
+    return _reopen(args, reset_review=False)
+
+
+def cmd_unblock(args: argparse.Namespace) -> int:
+    return _reopen(args, reset_review=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agents", description="Local filesystem agent board")
     parser.add_argument("--version", action="version", version=f"agent-board {__version__}")
@@ -137,6 +176,22 @@ def build_parser() -> argparse.ArgumentParser:
     move.add_argument("--to", required=True, choices=list(COLUMNS))
     move.add_argument("--note", default="")
     move.set_defaults(func=cmd_move)
+
+    logs = sub.add_parser("logs", help="show a card's log")
+    logs.add_argument("card_id")
+    logs.set_defaults(func=cmd_logs)
+
+    retry = sub.add_parser("retry", help="reopen a card for another worker attempt")
+    retry.add_argument("card_id")
+    retry.set_defaults(func=cmd_retry)
+
+    unblock = sub.add_parser("unblock", help="reopen a blocked card and reset review cycles")
+    unblock.add_argument("card_id")
+    unblock.set_defaults(func=cmd_unblock)
+
+    skill = sub.add_parser("install-skill", help="install the Architect skill for Claude Code")
+    skill.add_argument("--project", action="store_true", help="install into the project instead of the user dir")
+    skill.set_defaults(func=cmd_install_skill)
 
     return parser
 

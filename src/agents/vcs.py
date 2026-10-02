@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
-from .board import BoardError, AGENTS_DIRNAME
+from .board import AGENTS_DIRNAME, BoardError
 
 
-def git(cwd: Path | str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+def git(cwd: Path | str, *args: str, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    run_env = {**os.environ, **env} if env else None
     proc = subprocess.run(
-        ["git", "-C", str(cwd), *args], capture_output=True, text=True
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True, env=run_env
     )
     if check and proc.returncode != 0:
         raise BoardError(f"git {' '.join(args)} failed: {proc.stderr.strip() or proc.stdout.strip()}")
@@ -67,12 +69,52 @@ def diff(root: Path, base: str, branch: str) -> str:
     return git(root, "diff", f"{base}...{branch}", check=False).stdout
 
 
-def integrate(root: Path, base: str, branch: str) -> bool:
+def unmerged(root: Path) -> dict[str, str]:
+    output = git(root, "diff", "--name-only", "--diff-filter=U", check=False).stdout
+    conflicts: dict[str, str] = {}
+    for line in output.splitlines():
+        relative = line.strip()
+        if not relative:
+            continue
+        target = Path(root) / relative
+        conflicts[relative] = target.read_text(errors="replace") if target.is_file() else ""
+    return conflicts
+
+
+def _abort(root: Path, base: str) -> None:
+    git(root, "rebase", "--abort", check=False)
+    git(root, "checkout", base, check=False)
+
+
+def integrate(
+    root: Path,
+    base: str,
+    branch: str,
+    resolver=None,
+    max_rounds: int = 3,
+) -> bool:
     rebase = git(root, "rebase", base, branch, check=False)
     if rebase.returncode != 0:
-        git(root, "rebase", "--abort", check=False)
-        git(root, "checkout", base, check=False)
-        return False
+        for _ in range(max_rounds):
+            conflicts = unmerged(root)
+            if not conflicts or resolver is None:
+                _abort(root, base)
+                return False
+            resolved = resolver(conflicts)
+            if not resolved:
+                _abort(root, base)
+                return False
+            for relative, content in resolved.items():
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+                git(root, "add", "--", relative)
+            cont = git(root, "rebase", "--continue", check=False, env={"GIT_EDITOR": "true"})
+            if cont.returncode == 0:
+                break
+        else:
+            _abort(root, base)
+            return False
     git(root, "checkout", base, check=False)
     merge = git(root, "merge", "--ff-only", branch, check=False)
     return merge.returncode == 0
