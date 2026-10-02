@@ -66,7 +66,7 @@ Options: `--name my-clean-app`, `--owner my-org`, `--public`, `--with-ci` (seeds
 
 Then:
 1. Add repository variable `TARGET_REPO` in the factory repo (`Settings -> Secrets and variables -> Actions -> Variables`).
-2. Grant the fine-grained `AI_BRIDGE_PAT` access to **both** repositories (factory: contents/issues/pull-requests/actions write; target: contents/pull-requests write).
+2. Grant the fine-grained `AI_BRIDGE_PAT` access to **both** repositories (factory: contents/issues/pull-requests/actions write; target: contents/pull-requests/actions write). No `checks` permission is needed: fine-grained PATs cannot be granted Checks (GitHub limitation), so the review gate falls back to the Actions API (`actions: read`) to read CI status. A classic PAT with `repo` + `workflow` scopes also works.
 
 ## Role Contracts
 
@@ -143,7 +143,7 @@ Technical failures follow the same path: `max_task_attempts` exceeded → escala
    | Name | Purpose |
    |---|---|
    | `AI_ECONOMY_API_KEY` | DeepSeek key used by PM, Worker, and Reviewer |
-   | `AI_BRIDGE_PAT` | Fine-grained PAT with access to **both** repos. Factory: `contents`, `issues`, `pull-requests`, `actions` write. Target: `contents`, `pull-requests` write. **Required for autonomous loops** because `GITHUB_TOKEN`-created PRs do not trigger workflows |
+   | `AI_BRIDGE_PAT` | Fine-grained PAT with access to **both** repos. Factory: `contents`, `issues`, `pull-requests`, `actions` write. Target: `contents`, `pull-requests`, `actions` write. No `checks` permission exists for fine-grained PATs; CI status is read via the Actions API. A classic PAT with `repo` + `workflow` also works. **Required for autonomous loops** because `GITHUB_TOKEN`-created PRs do not trigger workflows |
 
 3. Initialize Repo B locally, then set the `TARGET_REPO` repository variable:
 

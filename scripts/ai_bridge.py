@@ -677,6 +677,25 @@ def find_open_pr(config: dict[str, Any], branch: str, repo: str | None) -> int |
     return int(data[0]["number"]) if data else None
 
 
+def actions_ci_status(config: dict[str, Any], pr_number: int, repo: str | None) -> None:
+    repo = repo or gh_json(["repo", "view", "--json", "nameWithOwner"])["nameWithOwner"]
+    head = gh_json(["pr", "view", str(pr_number), "--json", "headRefOid", *target_args(repo)])
+    sha = str(head.get("headRefOid") or "").strip()
+    if not sha:
+        raise CiNotGreen(f"PR #{pr_number}: could not determine the head commit for CI")
+    runs = gh_json(["api", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100"]).get("workflow_runs", [])
+    if not runs:
+        raise CiNotGreen(f"PR #{pr_number}: no CI checks found; deterministic CI must pass before review")
+    pending = [run for run in runs if run.get("status") != "completed"]
+    if pending:
+        names = ", ".join(sorted({str(run.get("name", "?")) for run in pending}))
+        raise CiNotGreen(f"PR #{pr_number}: CI still running: {names}")
+    failing = [run for run in runs if run.get("conclusion") not in ("success", "neutral", "skipped")]
+    if failing:
+        names = ", ".join(sorted({str(run.get("name", "?")) for run in failing}))
+        raise CiNotGreen(f"PR #{pr_number}: non-green CI runs: {names}")
+
+
 def ensure_ci_green(config: dict[str, Any], pr_number: int, repo: str | None) -> None:
     if not config["governance"].get("require_ci_pass", True):
         return
@@ -684,17 +703,17 @@ def ensure_ci_green(config: dict[str, Any], pr_number: int, repo: str | None) ->
         ["pr", "checks", str(pr_number), "--json", "name,state,bucket", *target_args(repo)],
         check=False,
     )
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout).strip().splitlines()
-        raise CiNotGreen(
-            f"PR #{pr_number}: could not read CI checks ({detail[-1] if detail else 'unknown gh error'})"
-        )
-    try:
-        checks = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError:
-        checks = []
+    checks: list[dict[str, Any]] = []
+    if proc.returncode == 0:
+        try:
+            checks = json.loads(proc.stdout or "[]")
+        except json.JSONDecodeError:
+            checks = []
     if not checks:
-        raise CiNotGreen(f"PR #{pr_number}: no CI checks found; deterministic CI must pass before review")
+        # Fine-grained PATs cannot be granted Checks; read CI state from the Actions API instead.
+        log("gh pr checks unavailable (fine-grained PAT); using the Actions API for CI status")
+        actions_ci_status(config, pr_number, repo)
+        return
     failing = [check for check in checks if check.get("bucket") not in ("pass", "skipping")]
     if failing:
         names = ", ".join(check.get("name", "?") for check in failing)
