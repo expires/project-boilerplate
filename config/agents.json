@@ -94,6 +94,11 @@
     "branch_prefix": "agent/task-",
     "commit_prefix": "feat(agent)"
   },
+  "target": {
+    "repo_env": "TARGET_REPO",
+    "app_dir_env": "AI_BRIDGE_APP_DIR",
+    "app_dir_default": "app-workspace"
+  },
   "roles": {
     "pm": {
       "provider": "economy",

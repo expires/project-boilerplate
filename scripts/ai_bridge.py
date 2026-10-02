@@ -24,6 +24,15 @@ CONFIG_PATH = ROOT / "config" / "agents.json"
 STATE_DIR = ROOT / ".ai-bridge"
 USAGE_PATH = STATE_DIR / "usage.json"
 
+
+def target_repo(config: dict[str, Any]) -> str:
+    env_name = config.get("target", {}).get("repo_env", "TARGET_REPO")
+    return os.environ.get(env_name, "").strip().rstrip("/")
+
+
+def target_args(repo: str | None) -> list[str]:
+    return ["--repo", repo] if repo else []
+
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CIRCUIT_BREAKER = 2
@@ -116,6 +125,17 @@ def load_config() -> dict[str, Any]:
 
 def queue_path(config: dict[str, Any]) -> Path:
     return ROOT / config["governance"].get("queue_file", "tasks.json")
+
+
+def app_root(config: dict[str, Any]) -> Path:
+    env_name = config.get("target", {}).get("app_dir_env", "AI_BRIDGE_APP_DIR")
+    explicit = os.environ.get(env_name, "").strip()
+    if explicit:
+        path = Path(explicit)
+        return path if path.is_absolute() else ROOT / path
+    if target_repo(config):
+        return ROOT / config.get("target", {}).get("app_dir_default", "app-workspace")
+    return ROOT
 
 
 def read_queue(config: dict[str, Any]) -> dict[str, Any]:
@@ -220,13 +240,13 @@ def sanitize(config: dict[str, Any], text: str | None) -> str:
     return result
 
 
-def add_labels(config: dict[str, Any], kind: str, number: int, labels: list[str]) -> None:
+def add_labels(config: dict[str, Any], kind: str, number: int, labels: list[str], repo: str | None = None) -> None:
     labels = [label for label in labels if label]
     if not labels:
         return
 
     def apply() -> subprocess.CompletedProcess:
-        args = [kind, "edit", str(number)]
+        args = [kind, "edit", str(number), *target_args(repo)]
         for label in labels:
             args.extend(["--add-label", label])
         return gh(args, check=False)
@@ -234,7 +254,7 @@ def add_labels(config: dict[str, Any], kind: str, number: int, labels: list[str]
     result = apply()
     if result.returncode != 0:
         for label in labels:
-            gh(["label", "create", label, "--force"], check=False)
+            gh(["label", "create", label, "--force", *target_args(repo)], check=False)
         apply()
 
 
@@ -449,9 +469,10 @@ def safe_repo_path(
     normalized = normalize_path(path)
     if not normalized or normalized.startswith("..") or normalized.startswith("/"):
         raise ProtectedPathError(f"illegal path: {path}")
-    resolved = (ROOT / normalized).resolve()
+    repo_dir = app_root(config)
+    resolved = (repo_dir / normalized).resolve()
     try:
-        resolved.relative_to(ROOT)
+        resolved.relative_to(repo_dir.resolve())
     except ValueError as exc:
         raise ProtectedPathError(f"path escapes repository: {path}") from exc
     if is_protected(config, normalized):
@@ -474,8 +495,9 @@ def build_context(config: dict[str, Any], task: dict[str, Any]) -> str:
     )
     chunks: list[str] = []
     used = 0
+    repo_dir = app_root(config)
     for relative in files:
-        absolute = ROOT / normalize_path(relative)
+        absolute = repo_dir / normalize_path(relative)
         if not absolute.exists():
             chunks.append(f"### FILE: {relative}\n(missing; create it if the task requires)\n")
             continue
@@ -495,22 +517,53 @@ def changed_line_count(before: str, after: str) -> int:
     return sum(1 for line in diff if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
 
 
-def git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return run_cmd(["git", *args], check=check)
+def git(config: dict[str, Any], *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return run_cmd(["git", "-C", str(app_root(config)), *args], check=check)
 
 
-def ensure_branch(branch: str, base: str, reuse: bool) -> None:
+def ensure_git_identity(config: dict[str, Any]) -> None:
+    for key, value in (("user.name", "AI Worker"), ("user.email", "ai-worker@users.noreply.github.com")):
+        probe = git(config, "config", key, check=False)
+        if probe.returncode != 0:
+            git(config, "config", key, value)
+
+
+def ensure_branch(config: dict[str, Any], branch: str, base: str, reuse: bool) -> None:
     if reuse:
-        git(["fetch", "origin", branch])
-        git(["checkout", "-B", branch, f"origin/{branch}"])
+        git(config, "fetch", "origin", branch)
+        git(config, "checkout", "-B", branch, f"origin/{branch}")
         return
     ref = f"origin/{base}"
-    probe = git(["rev-parse", "--verify", ref], check=False)
-    git(["checkout", "-B", branch, ref if probe.returncode == 0 else base])
+    probe = git(config, "rev-parse", "--verify", ref, check=False)
+    git(config, "checkout", "-B", branch, ref if probe.returncode == 0 else base)
 
 
-def find_open_pr(branch: str) -> int | None:
-    proc = gh(["pr", "list", "--head", branch, "--state", "open", "--limit", "1", "--json", "number"], check=False)
+def default_branch(config: dict[str, Any], repo: str | None) -> str:
+    if repo:
+        data = gh_json(["repo", "view", repo, "--json", "defaultBranchRef"])
+        name = (data.get("defaultBranchRef") or {}).get("name")
+        if name:
+            return str(name)
+    return config["branching"].get("base_branch", "main")
+
+
+def find_open_pr(config: dict[str, Any], branch: str, repo: str | None) -> int | None:
+    proc = gh(
+        [
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--limit",
+            "1",
+            "--json",
+            "number",
+            *target_args(repo),
+        ],
+        check=False,
+    )
     if proc.returncode != 0:
         return None
     try:
@@ -520,10 +573,13 @@ def find_open_pr(branch: str) -> int | None:
     return int(data[0]["number"]) if data else None
 
 
-def ensure_ci_green(config: dict[str, Any], pr_number: int) -> None:
+def ensure_ci_green(config: dict[str, Any], pr_number: int, repo: str | None) -> None:
     if not config["governance"].get("require_ci_pass", True):
         return
-    proc = gh(["pr", "checks", str(pr_number), "--json", "name,state,bucket"], check=False)
+    proc = gh(
+        ["pr", "checks", str(pr_number), "--json", "name,state,bucket", *target_args(repo)],
+        check=False,
+    )
     try:
         checks = json.loads(proc.stdout or "[]")
     except json.JSONDecodeError:
@@ -578,6 +634,7 @@ JSON schema:
 
 WORKER_USER = """TASK __ID__: __TITLE__
 ROUTING: __LABEL__
+REPOSITORY: __REPO__ (all paths are relative to this repository)
 DEPTH: __DEPTH__ (maximum allowed: __MAX_DEPTH__; you cannot delegate)
 
 SPEC:
@@ -730,6 +787,7 @@ def escalation_body(config: dict[str, Any], task: dict[str, Any], reason: str) -
 | Review cycles | {task.get('review_cycles', 0)} |
 | Attempts | {task.get('attempts', 0)} |
 | Source spec | #{task.get('source_issue', '?')} |
+| Target repo | `{target_repo(config) or '(this repository)'}` |
 | PR | {('#' + str(task['pr'])) if task.get('pr') else '(none)'} |
 
 ### Task spec
@@ -781,14 +839,15 @@ def mark_pipeline_halted(config: dict[str, Any], config_queue: dict[str, Any], e
 
 
 def trip_circuit_breaker(config: dict[str, Any], task: dict[str, Any], reason: str) -> int:
+    repo = target_repo(config)
     pr_number = task.get("pr")
     if pr_number and config.get("escalation", {}).get("close_pr", True):
         body = sanitize(
             config,
             f"{REVIEW_MARKER}\nCircuit breaker tripped: {reason}. Closing this PR and escalating to the Architect.",
         )
-        gh(["pr", "comment", str(pr_number), "--body-file", "-"], input_text=body, check=False)
-        close_args = ["pr", "close", str(pr_number)]
+        gh(["pr", "comment", str(pr_number), "--body-file", "-", *target_args(repo)], input_text=body, check=False)
+        close_args = ["pr", "close", str(pr_number), *target_args(repo)]
         if config.get("escalation", {}).get("delete_branch", False):
             close_args.append("--delete-branch")
         gh(close_args, check=False)
@@ -888,7 +947,7 @@ Review retries: {config['governance']['review_retries']} · Auto-merge: {config[
 |---|---|---|---|---|
 {rows}
 
-The queue engine will dispatch workers automatically. No stakeholder action is required.
+The queue engine will dispatch workers automatically. Code changes will open PRs against `{target_repo(config) or 'this repository'}`. No stakeholder action is required.
 """,
     )
     gh(["issue", "comment", str(issue["number"]), "--body-file", "-"], input_text=comment)
@@ -941,6 +1000,10 @@ def cmd_claim(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_config()
+    repo = target_repo(config)
+    repo_dir = app_root(config)
+    if repo and not repo_dir.is_dir():
+        raise BridgeError(f"TARGET_REPO={repo} is set but the application workspace was not found: {repo_dir}")
     lease_minutes = int(config["governance"].get("lease_minutes", 45))
     with queue_txn(config) as queue:
         task = queue.find(args.task_id)
@@ -968,6 +1031,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             WORKER_USER.replace("__ID__", task_snapshot["id"])
             .replace("__TITLE__", task_snapshot["title"])
             .replace("__LABEL__", task_snapshot.get("agent_label", ""))
+            .replace("__REPO__", repo or "this repository")
             .replace("__DEPTH__", str(task_snapshot.get("depth", 1)))
             .replace("__MAX_DEPTH__", str(config["governance"]["max_depth"]))
             .replace("__SPEC__", task_snapshot.get("spec", ""))
@@ -1010,13 +1074,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             absolute.parent.mkdir(parents=True, exist_ok=True)
             absolute.write_text(content)
         branch = task_snapshot.get("branch") or config["branching"]["branch_prefix"] + task_snapshot["id"].lower()
-        base = config["branching"].get("base_branch", "main")
+        base = default_branch(config, repo)
         reuse = bool(task_snapshot.get("branch"))
-        ensure_branch(branch, base, reuse)
-        git(["add", "--", *[normalize_path(item["path"]) for item in worker_files]])
-        git(["commit", "-m", f"{config['branching'].get('commit_prefix', 'feat(agent)')}: {task_snapshot['id']} {task_snapshot['title']}"])
-        git(["push", "origin", f"HEAD:refs/heads/{branch}"])
-        pr_number = task_snapshot.get("pr") or find_open_pr(branch)
+        ensure_git_identity(config)
+        ensure_branch(config, branch, base, reuse)
+        git(config, "add", "--", *[normalize_path(item["path"]) for item in worker_files])
+        git(
+            config,
+            "commit",
+            "-m",
+            f"{config['branching'].get('commit_prefix', 'feat(agent)')}: {task_snapshot['id']} {task_snapshot['title']}",
+        )
+        git(config, "push", "origin", f"HEAD:refs/heads/{branch}")
+        pr_number = task_snapshot.get("pr") or find_open_pr(config, branch, repo)
         if not pr_number:
             labels = [config["labels"]["auto_pr"], task_snapshot.get("agent_label", "")]
             criteria_boxes = "\n".join(f"- [ ] {item}" for item in task_snapshot.get("acceptance_criteria", []))
@@ -1044,15 +1114,14 @@ Generated by the autonomous pipeline. Deterministic CI must pass before agent re
                 base,
                 "--head",
                 branch,
+                *target_args(repo),
             ]
-            for label in labels:
-                if label:
-                    create_args.extend(["--label", label])
             proc = gh(create_args, input_text=body)
             match = re.search(r"/pull/(\d+)", proc.stdout)
             if not match:
                 raise BridgeError("could not parse PR number from gh output")
             pr_number = int(match.group(1))
+            add_labels(config, "pr", pr_number, labels, repo=repo)
         with queue_txn(config) as queue:
             live = queue.find(task_snapshot["id"])
             if live:
@@ -1061,8 +1130,8 @@ Generated by the autonomous pipeline. Deterministic CI must pass before agent re
                 live["pr"] = pr_number
                 live["last_review"] = None
                 live["lease_until"] = None
-                queue.touch(live, f"PR #{pr_number} opened for review")
-        log(f"task {task_snapshot['id']} produced PR #{pr_number}")
+                queue.touch(live, f"PR #{pr_number} opened in {repo or 'this repository'} for review")
+        log(f"task {task_snapshot['id']} produced PR #{pr_number} in {repo or 'this repository'}")
         return EXIT_OK
     except BridgeError as exc:
         log(f"task {args.task_id} failed: {exc}")
@@ -1072,8 +1141,9 @@ Generated by the autonomous pipeline. Deterministic CI must pass before agent re
 
 def cmd_review(args: argparse.Namespace) -> int:
     config = load_config()
+    repo = target_repo(config)
     if not args.dry_run:
-        ensure_ci_green(config, args.pr)
+        ensure_ci_green(config, args.pr, repo)
     with queue_txn(config) as queue:
         task = queue.find_pr(args.pr)
         if not task:
@@ -1082,7 +1152,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     retries = int(config["governance"]["review_retries"])
     if int(task_snapshot.get("review_cycles", 0)) >= retries:
         return trip_circuit_breaker(config, task_snapshot, f"review retries exhausted ({retries})")
-    diff = gh(["pr", "diff", str(args.pr)]).stdout
+    diff = gh(["pr", "diff", str(args.pr), *target_args(repo)]).stdout
     max_input = int(config["cost_controls"].get("max_input_chars", 48000))
     if len(diff) > max_input // 2:
         diff = diff[: max_input // 2] + "\n...(diff truncated for cost control)"
@@ -1109,10 +1179,16 @@ def cmd_review(args: argparse.Namespace) -> int:
             f"{REVIEW_MARKER}\n## Agent review: approved\n\n{summary}\n\n"
             + ("Nitpicks:\n" + "\n".join(f"- {item}" for item in nitpicks) if nitpicks else ""),
         )
-        gh(["pr", "review", str(args.pr), "--approve", "--body-file", "-"], input_text=approve_body)
+        gh(
+            ["pr", "review", str(args.pr), "--approve", "--body-file", "-", *target_args(repo)],
+            input_text=approve_body,
+        )
         merged = False
         if config["governance"].get("auto_merge", True):
-            proc = gh(["pr", "merge", str(args.pr), "--squash", "--delete-branch"], check=False)
+            proc = gh(
+                ["pr", "merge", str(args.pr), "--squash", "--delete-branch", *target_args(repo)],
+                check=False,
+            )
             merged = proc.returncode == 0
         with queue_txn(config) as queue:
             live = queue.find(task_snapshot["id"])
@@ -1122,8 +1198,8 @@ def cmd_review(args: argparse.Namespace) -> int:
                 queue.touch(live, "review approved" + (" and merged" if merged else "; awaiting manual merge"))
         if not merged and config["governance"].get("auto_merge", True):
             note = sanitize(config, f"{REVIEW_MARKER}\nAuto-merge failed (branch protection?); a human must merge.")
-            gh(["pr", "comment", str(args.pr), "--body-file", "-"], input_text=note, check=False)
-        log(f"PR #{args.pr} approved")
+            gh(["pr", "comment", str(args.pr), "--body-file", "-", *target_args(repo)], input_text=note, check=False)
+        log(f"PR #{args.pr} approved in {repo or 'this repository'}")
         return EXIT_OK
     cycles = int(task_snapshot.get("review_cycles", 0)) + 1
     last_review = {
@@ -1139,7 +1215,13 @@ def cmd_review(args: argparse.Namespace) -> int:
             live["last_review"] = last_review
             live["lease_until"] = None
             queue.touch(live, f"review requested changes (cycle {cycles}/{retries})")
-    add_labels(config, "pr", args.pr, [f"{config['labels'].get('strike_prefix', 'strike:')}{cycles}"])
+    add_labels(
+        config,
+        "pr",
+        args.pr,
+        [f"{config['labels'].get('strike_prefix', 'strike:')}{cycles}"],
+        repo=repo,
+    )
     if cycles >= retries:
         return trip_circuit_breaker(config, task_snapshot | {"review_cycles": cycles, "last_review": last_review}, f"{cycles} review cycles without approval")
     body = sanitize(
@@ -1153,8 +1235,51 @@ def cmd_review(args: argparse.Namespace) -> int:
 """ + ("\n".join(f"- {item}" for item in blocking) or "- (see summary)")
         + ("\n\n### Nitpicks\n" + "\n".join(f"- {item}" for item in nitpicks) if nitpicks else ""),
     )
-    gh(["pr", "comment", str(args.pr), "--body-file", "-"], input_text=body)
-    log(f"PR #{args.pr} requested changes (strike {cycles}/{retries})")
+    gh(["pr", "comment", str(args.pr), "--body-file", "-", *target_args(repo)], input_text=body)
+    log(f"PR #{args.pr} requested changes (strike {cycles}/{retries}) in {repo or 'this repository'}")
+    return EXIT_OK
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    config = load_config()
+    repo = target_repo(config)
+    if not repo:
+        raise BridgeError("sweep requires TARGET_REPO (dual-repo mode)")
+    prs = gh_json(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--label",
+            config["labels"]["auto_pr"],
+            "--limit",
+            str(max(1, int(args.limit))),
+            "--json",
+            "number,labels",
+        ]
+    )
+    reviewed: list[int] = []
+    for pr in prs or []:
+        number = int(pr.get("number"))
+        with queue_txn(config) as queue:
+            if not queue.find_pr(number):
+                log(f"skip PR #{number} in {repo}: not linked to a managed task")
+                continue
+        try:
+            code = cmd_review(argparse.Namespace(pr=number, dry_run=args.dry_run))
+        except CiNotGreen as exc:
+            log(f"skip PR #{number}: {exc}")
+            continue
+        except BridgeError as exc:
+            log(f"PR #{number}: {exc}")
+            continue
+        if code == EXIT_CIRCUIT_BREAKER:
+            return code
+        reviewed.append(number)
+    print(json.dumps({"target_repo": repo, "reviewed": reviewed}))
     return EXIT_OK
 
 
@@ -1179,6 +1304,7 @@ def cmd_requeue_stale(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     config = load_config()
+    repo_dir = app_root(config)
     with queue_txn(config) as queue:
         tasks = queue.tasks()
         counts: dict[str, int] = {}
@@ -1187,6 +1313,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         summary = {
             "queue": str(queue_path(config).relative_to(ROOT)),
             "master_spec_issue": queue.data.get("master_spec_issue"),
+            "target_repo": target_repo(config) or "(this repository)",
+            "app_dir": str(repo_dir.relative_to(ROOT)) if repo_dir != ROOT else ".",
             "total_tasks": len(tasks),
             "counts": counts,
             "caps": {
@@ -1197,6 +1325,160 @@ def cmd_status(args: argparse.Namespace) -> int:
             },
         }
     print(json.dumps(summary, indent=2))
+    return EXIT_OK
+
+
+CI_SEED = """name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run available stack checks
+        run: |
+          set -euo pipefail
+          ran=0
+          if [ -f package.json ]; then
+            if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+            npm run lint --if-present
+            npm test --if-present
+            ran=1
+          fi
+          if [ -f requirements.txt ]; then
+            python -m pip install -q -r requirements.txt
+            ran=1
+          fi
+          if [ -f pyproject.toml ]; then
+            python -m pip install -q -e . || true
+            ran=1
+          fi
+          if [ "$ran" -eq 1 ] && { [ -d tests ] || [ -f pytest.ini ] || grep -q "pytest" pyproject.toml 2>/dev/null; }; then
+            python -m pip install -q pytest
+            python -m pytest -q
+          fi
+          if [ -f go.mod ]; then
+            go vet ./...
+            go test ./...
+            ran=1
+          fi
+          if [ -f Cargo.toml ]; then
+            cargo clippy -- -D warnings
+            cargo test
+            ran=1
+          fi
+"""
+
+
+def upsert_env(path: Path, key: str, value: str) -> None:
+    lines = path.read_text().splitlines() if path.exists() else []
+    output: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.strip().startswith(f"{key}="):
+            output.append(f"{key}={value}")
+            replaced = True
+        else:
+            output.append(line)
+    if not replaced:
+        if output and output[-1].strip():
+            output.append("")
+        output.append(f"{key}={value}")
+    path.write_text("\n".join(output) + "\n")
+
+
+def prompt_repo_name(default: str = "") -> str:
+    if not sys.stdin.isatty():
+        raise BridgeError("non-interactive session: pass --name <repository-name>")
+    suffix = f" [{default}]" if default else ""
+    value = input(f"Name for the new application repository{suffix}: ").strip() or default
+    if not value:
+        raise BridgeError("a repository name is required")
+    return value
+
+
+def seed_ci_workflow(full_repo: str) -> None:
+    import base64
+
+    encoded = base64.b64encode(CI_SEED.encode("utf-8")).decode("ascii")
+    gh(
+        [
+            "api",
+            f"repos/{full_repo}/contents/.github/workflows/ci.yml",
+            "-X",
+            "PUT",
+            "-f",
+            "message=chore: seed deterministic CI for the agent pipeline",
+            "-f",
+            f"content={encoded}",
+        ]
+    )
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    config = load_config()
+    name = args.name or prompt_repo_name()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?", name):
+        raise BridgeError(f"invalid repository name: {name}")
+    owner = args.owner.strip()
+    if "/" in name:
+        full_repo = name
+    else:
+        owner = owner or gh(["api", "user", "--jq", ".login"]).stdout.strip()
+        if not owner:
+            raise BridgeError("could not determine the repository owner; pass --owner")
+        full_repo = f"{owner}/{name}"
+    view = gh(["repo", "view", full_repo, "--json", "name,defaultBranchRef"], check=False)
+    if view.returncode == 0:
+        log(f"repository {full_repo} already exists; reusing it")
+    else:
+        create_args = [
+            "repo",
+            "create",
+            full_repo,
+            "--add-readme",
+            "--description",
+            "Application repository managed by the dual-repo agent pipeline",
+            "--public" if args.public else "--private",
+        ]
+        gh(create_args)
+        log(f"created repository {full_repo}")
+    strike_prefix = config["labels"].get("strike_prefix", "strike:")
+    retries = int(config["governance"]["review_retries"])
+    label_names = [config["labels"]["auto_pr"], *config["labels"].get("routing", {}).keys()]
+    label_names.extend(f"{strike_prefix}{index}" for index in range(1, retries + 1))
+    for label in label_names:
+        gh(
+            ["label", "create", label, "--repo", full_repo, "--force", "--color", "ededed"],
+            check=False,
+        )
+    if args.with_ci:
+        seed_ci_workflow(full_repo)
+    env_path = ROOT / ".env"
+    if not env_path.exists() and (ROOT / ".env.example").exists():
+        env_path.write_text((ROOT / ".env.example").read_text())
+    upsert_env(env_path, "TARGET_REPO", full_repo)
+    print(
+        json.dumps(
+            {
+                "target_repo": full_repo,
+                "env_file": str(env_path.relative_to(ROOT)),
+                "labels_created": label_names,
+                "ci_seeded": bool(args.with_ci),
+                "next_steps": [
+                    "Add repository variable TARGET_REPO in the factory repo Actions settings",
+                    "Grant AI_BRIDGE_PAT access to both repositories",
+                    "Re-run the pipeline or dispatch mode=pump",
+                ],
+            },
+            indent=2,
+        )
+    )
     return EXIT_OK
 
 
@@ -1225,12 +1507,24 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--dry-run", action="store_true")
     review.set_defaults(func=cmd_review)
 
+    sweep = sub.add_parser("sweep", help="review every open agent PR with green CI in the target repo")
+    sweep.add_argument("--limit", type=int, default=2)
+    sweep.add_argument("--dry-run", action="store_true")
+    sweep.set_defaults(func=cmd_sweep)
+
     requeue = sub.add_parser("requeue-stale", help="return expired worker leases to the queue")
     requeue.add_argument("--minutes", type=int, default=0)
     requeue.set_defaults(func=cmd_requeue_stale)
 
     status = sub.add_parser("status", help="print queue status")
     status.set_defaults(func=cmd_status)
+
+    init = sub.add_parser("init", help="create the target application repository and register it")
+    init.add_argument("--name", default="", help="repository name; prompts if omitted")
+    init.add_argument("--owner", default="", help="owner or org; defaults to the authenticated user")
+    init.add_argument("--public", action="store_true", help="create a public repository (default private)")
+    init.add_argument("--with-ci", action="store_true", help="seed a minimal CI workflow in the new repo")
+    init.set_defaults(func=cmd_init)
 
     return parser
 

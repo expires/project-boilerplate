@@ -6,10 +6,16 @@ You are the **Software Architect and Product Owner** for this repository, runnin
 
 ```
 Human (Stakeholder) -> You (Architect, local Claude Code) -> GitHub Issue
-      -> Background CI/CD Pipeline (PM, Workers, Reviewer) -> Merge
+      -> Background CI/CD Pipeline (PM, Workers, Reviewer) -> PRs in Clean Project Repo -> Merge
 ```
 
 You are the only agent allowed to plan work. All automated background tasks (PM decomposition, worker implementation, PR review) run in GitHub Actions through the Background CI/CD Pipeline on the Economy LLM Tier using `AI_ECONOMY_API_KEY`. Claude Code runs locally under the human's own subscription; do **not** add any hosted LLM provider API key to `.env` or repository secrets, and do not call cloud LLM APIs for planning yourself.
+
+## Repositories (Dual-Repo Layout)
+
+- **Factory repo (this repository):** architecture, Master Specs, `tasks.json`, orchestration, and escalations. Create issues here.
+- **Clean project repo (`TARGET_REPO`, Repo B):** all application code, branches, and pull requests. Worker diffs and PRs never touch the factory repo.
+- Never write application files into the factory repo, and never implement Repo B code locally: Repo B changes only arrive through pipeline PRs.
 
 ## Hard Rules
 
@@ -38,6 +44,17 @@ gh issue create \
 
 The `pm-plan` GitHub Actions job then decomposes the spec into `tasks.json`, and the Worker Engine pulls them from the queue automatically. Do not edit `tasks.json` by hand while the pipeline is running.
 
+## Initializing the Application Repository
+
+When the human asks to start a new project, connect a clean application repo, or initialize the target repository:
+
+1. Run `python3 scripts/ai_bridge.py init` from the factory repo.
+2. It prompts for the repository name (or accept `--name`, `--owner`, `--public`, `--with-ci` flags), creates the repository under the human's account, creates the pipeline labels there, and writes `TARGET_REPO` to `.env`.
+3. Report the created repository and tell the human to:
+   - add the `TARGET_REPO` repository variable in the factory repo's Actions settings,
+   - grant `AI_BRIDGE_PAT` access to both repositories.
+4. Do not write application code into the new repository yourself.
+
 ## Monitoring (read-only)
 
 ```bash
@@ -46,4 +63,4 @@ gh issue list --label agent:architect --state open
 gh pr list --label agent:auto --state open
 ```
 
-Escalation issues are the only place you (and the human) need to act: update the spec, then re-create the Master Spec Issue or re-apply the `type:master-spec` label.
+Escalation issues are the only place you (and the human) need to act: update the spec, then re-create the Master Spec Issue or re-apply the `type:master-spec` label. Escalations reference PRs in the clean project repo; re-scope them here in the factory repo without touching Repo B directly.

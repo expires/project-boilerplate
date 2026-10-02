@@ -32,6 +32,8 @@ permissions:
 env:
   PYTHONUNBUFFERED: "1"
   GH_TOKEN: ${{ secrets.AI_BRIDGE_PAT || secrets.GITHUB_TOKEN }}
+  TARGET_REPO: ${{ vars.TARGET_REPO }}
+  AI_BRIDGE_APP_DIR: app-workspace
   AI_ECONOMY_API_KEY: ${{ secrets.AI_ECONOMY_API_KEY }}
   AI_ECONOMY_BASE_URL: ${{ vars.AI_ECONOMY_BASE_URL }}
   PM_MODEL: ${{ vars.PM_MODEL }}
@@ -129,12 +131,14 @@ jobs:
     needs: ci
     if: |
       always() && !cancelled()
-      && (needs.ci.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review'))
       && (
-        (github.event_name == 'pull_request'
+        github.event_name == 'schedule'
+        || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review')
+        || (github.event_name == 'pull_request'
+          && vars.TARGET_REPO == ''
+          && needs.ci.result == 'success'
           && contains(github.event.pull_request.labels.*.name, 'agent:auto')
           && !contains(github.event.pull_request.labels.*.name, 'escalation'))
-        || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review')
       )
     runs-on: ubuntu-latest
     steps:
@@ -154,13 +158,16 @@ jobs:
           key: ai-bridge-usage-${{ github.run_id }}
           restore-keys: |
             ai-bridge-usage-
-      - name: Review PR after deterministic CI
+      - name: Review PR(s) after deterministic CI
         env:
           TARGET_PR: ${{ github.event.pull_request.number || inputs.target }}
         run: |
           set -uo pipefail
-          test -n "$TARGET_PR"
-          python scripts/ai_bridge.py review --pr "$TARGET_PR"
+          if [ -n "${TARGET_PR:-}" ]; then
+            python scripts/ai_bridge.py review --pr "$TARGET_PR"
+          else
+            python scripts/ai_bridge.py sweep --limit 2
+          fi
           code=$?
           if [ "$code" -eq 2 ]; then
             echo "::warning title=Circuit breaker tripped::3 strikes reached; PR closed and escalation issue opened."
@@ -225,10 +232,18 @@ jobs:
       group: ai-worker-${{ matrix.task_id }}
       cancel-in-progress: false
     steps:
-      - name: Checkout
+      - name: Checkout factory repo
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.AI_BRIDGE_PAT || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Checkout target application repo
+        if: vars.TARGET_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TARGET_REPO }}
+          path: app-workspace
+          token: ${{ secrets.AI_BRIDGE_PAT }}
           fetch-depth: 0
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -245,6 +260,10 @@ jobs:
         run: |
           git config user.name "AI Worker"
           git config user.email "ai-worker@users.noreply.github.com"
+          if [ -d "${AI_BRIDGE_APP_DIR}/.git" ]; then
+            git -C "$AI_BRIDGE_APP_DIR" config user.name "AI Worker"
+            git -C "$AI_BRIDGE_APP_DIR" config user.email "ai-worker@users.noreply.github.com"
+          fi
       - name: Execute isolated task
         run: |
           python scripts/ai_bridge.py run --task-id "${{ matrix.task_id }}"
