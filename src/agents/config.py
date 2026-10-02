@@ -7,6 +7,53 @@ from typing import Any
 
 from .board import AGENTS_DIRNAME, COLUMNS, Board
 
+GITIGNORE_BLOCK = """# --- agent-board runtime state (board cards are committed; these are not) ---
+.agents/worktrees/
+.agents/logs/
+.agents/usage.json
+.agents/board/.lock
+.agents/board/**/.tmp-*
+"""
+
+GITIGNORE_TEMPLATE = (
+    """# --- Secrets / environment ---
+.env
+.env.*
+!.env.example
+**/secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+"""
+    + GITIGNORE_BLOCK
+    + """
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Node ---
+node_modules/
+dist/
+build/
+coverage/
+.next/
+
+# --- OS / editors ---
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+"""
+)
+
 PROJECT_TEMPLATE = """# Project brief
 
 Written by the Architect during `agents init`. Keep it short and factual.
@@ -172,4 +219,19 @@ def scaffold(root: Path, project_name: str = "") -> Board:
             "AI_ECONOMY_API_KEY=\n"
         )
 
+    ensure_gitignore(Path(root))
+
     return board
+
+
+def ensure_gitignore(root: Path) -> Path:
+    path = Path(root) / ".gitignore"
+    if not path.exists():
+        path.write_text(GITIGNORE_TEMPLATE)
+        return path
+    existing = path.read_text()
+    if ".agents/worktrees/" in existing:
+        return path
+    separator = "" if existing.endswith("\n") else "\n"
+    path.write_text(existing + separator + "\n" + GITIGNORE_BLOCK)
+    return path

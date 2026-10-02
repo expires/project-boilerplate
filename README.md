@@ -31,7 +31,7 @@ agents install-skill                                      # installs /agents-ini
    - writes `.agents/project.md` and updates `.agents/config.json`,
    - tells you to start the runner.
 
-3. **Put your DeepSeek key in `.env`** (created by `init`):
+3. **Put your DeepSeek key in `.env`** (created by `init`, along with a `.gitignore`):
    ```
    AI_ECONOMY_API_KEY=sk-...
    ```

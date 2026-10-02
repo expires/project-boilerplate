@@ -28,6 +28,18 @@ class BoardTests(unittest.TestCase):
             self.assertTrue((agents / "board" / column).is_dir(), column)
         self.assertTrue((self.root / ".env").is_file())
         self.assertIn("AI_ECONOMY_API_KEY=", (self.root / ".env").read_text())
+        self.assertTrue((self.root / ".gitignore").is_file())
+        self.assertIn(".agents/worktrees/", (self.root / ".gitignore").read_text())
+
+    def test_gitignore_appended_and_idempotent(self):
+        path = self.root / ".gitignore"
+        path.write_text("custom-ignore\n")
+        config.scaffold(self.root)
+        text = path.read_text()
+        self.assertIn("custom-ignore\n", text)
+        self.assertIn(".agents/worktrees/", text)
+        config.scaffold(self.root)
+        self.assertEqual(path.read_text(), text)
 
     def test_find_project_root_walks_up(self):
         nested = self.root / "a" / "b"
