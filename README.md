@@ -1,143 +1,113 @@
 # agent-board
 
-A local, filesystem-based multi-agent board. Claude is the **Architect**; DeepSeek is the **PM, workers, and reviewer**. No GitHub, no CI, no remote services, no execution of model-generated shell commands.
+A local, filesystem-based multi-agent board that you drive entirely from **Claude Code**. Claude is the Architect; a local runner executes the board with DeepSeek workers and a reviewer. No GitHub, no CI, no remote services, no execution of model-generated shell commands.
 
-Everything lives in a `.agents/` directory inside your project:
+```
+You  ⟷  Claude Code (Architect)              turns the work into cards
+              └── .agents/board/not_started/
+                        │
+                        │  agents run   (local runner)
+                        ▼
+        DeepSeek PM → worker → reviewer
+              in_progress → review → closed
+```
+
+- **Claude Code** interviews you and lays the work out as task cards. It never writes application code.
+- **The runner** (`agents run`) takes each card, has a DeepSeek worker implement it on a git branch in an isolated worktree, has a DeepSeek reviewer approve it, then merges into your base branch.
+
+## One-time setup
+
+```bash
+uv tool install --editable /path/to/project-boilerplate   # installs the `agents` command
+agents install-skill                                      # installs /agents-init and /agents-add
+```
+
+## Use it — Claude Code only
+
+1. **Open Claude Code** in your project directory.
+
+2. **`/agents-init`** — Claude interviews you (project name/purpose, stack, conventions, definition of done, base branch), then:
+   - runs `agents init --name "…"`,
+   - writes `.agents/project.md` and updates `.agents/config.json`,
+   - tells you to start the runner.
+
+3. **Put your DeepSeek key in `.env`** (created by `init`):
+   ```
+   AI_ECONOMY_API_KEY=sk-...
+   ```
+
+4. **Start the runner once** and leave it running in a terminal:
+   ```bash
+   agents run
+   ```
+
+5. **`/agents-add "<feature>"`** — describe a feature; Claude turns it into one or more task
+   cards (files, acceptance criteria, dependencies, priority). Repeat as you go, turn by turn.
+
+6. **Ask Claude anything about the board** — "what's on the board?", "what's blocked?", "why
+   did T-004 fail?" Claude runs `agents status` / `agents card` / `agents logs` and reports.
+
+That's the whole loop: you talk to Claude Code, the runner does the work.
+
+## What Claude will and won't do
+
+| Will | Won't |
+|---|---|
+| Interview you and write the project brief | Write or edit application code |
+| Create and update task cards | Call the DeepSeek API |
+| Read board state and explain failures | Hand-edit files under `.agents/board/` |
+| Reset/reopen blocked cards for you | Push to any remote or touch GitHub |
+
+## The runner
+
+| Command | Purpose |
+|---|---|
+| `agents run` | Watch mode (default): loops PM → worker → reviewer. `Ctrl-C` to stop. |
+| `agents run --once` | A single pass, then exit. |
+
+The runner reads `AI_ECONOMY_API_KEY` from `.env`. It is the only thing that calls DeepSeek.
+
+## The board
 
 ```
 .agents/
-  project.md          # architect brief (purpose, stack, conventions, definition of done)
-  config.json         # roles/models, governance, protected paths, optional verify commands
+  project.md          # the brief Claude wrote
+  config.json         # base branch, protected paths, optional verify
   board/
-    not_started/      # the Architect assigns cards here; workers pull
+    not_started/      # cards Claude assigned; the runner picks these up
     in_progress/      # claimed + leased
-    review/           # implementation done, awaiting reviewer
-    blocked/          # retries exhausted / escalations
+    review/           # implemented, awaiting the reviewer
+    blocked/          # retries exhausted — ask Claude to look
     closed/           # approved + merged
-  specs/              # optional: raw specs for the PM to decompose (off by default)
-  worktrees/<id>/     # isolated git worktree per in-flight task
-  logs/               # per-card logs
+  worktrees/<id>/     # one git worktree per in-flight task
+  logs/<id>.log       # per-card history
   usage.json          # per-project token/cost ledger
 ```
 
-Cards are Markdown files with YAML frontmatter:
+A card is a Markdown file with YAML frontmatter (`id`, `title`, `status`, `priority`,
+`depends_on`, `route`, `acceptance_criteria`, `files_hint`, `branch`, `history`, …). You
+never write these by hand — Claude does, through the CLI.
 
-```markdown
----
-id: T-001
-title: Add hello.py and its pytest
-status: not_started
-priority: 1
-depends_on: []
-route: backend
-acceptance_criteria: ['hello.py prints "hello"', 'tests/test_hello.py passes']
-files_hint: [hello.py, tests/test_hello.py]
-depth: 1
-attempts: 0
-review_cycles: 0
-branch: agent/t-001
-base: main
----
+## Configuration
 
-Implement `hello.py` with a `greet()` function and a pytest test.
-```
+`.agents/config.json` — Claude sets the important parts during `/agents-init`:
+
+- `vcs.base_branch` — where approved work merges (default `main`).
+- `context.protected_paths` — files agents may never write (defaults cover `.agents/**`, `.git/**`, `.env*`, secrets).
+- `verify` — optional deterministic commands the runner executes before review (off by default).
+- `governance.decompose_specs` — off by default: Claude authors cards directly. Turn on to let the DeepSeek PM decompose raw specs in `.agents/specs/`.
 
 ## Requirements
 
 - Python 3.11+
-- A DeepSeek API key in `AI_ECONOMY_API_KEY` (`agents init` creates `.env` for it)
+- A DeepSeek API key (`agents init` creates `.env` for it)
 
-## Install
+## Troubleshooting
 
-```bash
-uv tool install --editable .     # recommended: puts `agents` on your PATH
-# or: pip install -e .
-```
-
-## Quickstart
-
-```bash
-cd your-project
-agents init --name my-app          # scaffold .agents/ + .env, and prints next steps
-# put your key in .env
-agents add "Add hello.py and its pytest" --file hello.py --criterion "greet() returns 'hello'"
-agents status
-```
-
-Run the board (watch mode is the default; Ctrl-C to stop):
-
-```bash
-agents run             # loop: PM -> workers -> reviewer
-agents run --once      # a single tick, then exit
-```
-
-## CLI
-
-| Command | Purpose |
-|---|---|
-| `agents init [--name N]` | scaffold `.agents/` + `.env` in the current directory |
-| `agents add "<title>" [--file F…] [--criterion C…] [--depends-on ID…] [--route R] [--priority N] [--body-file -]` | create one task card |
-| `agents plan [--file F \| --stdin]` | bulk-import task cards from JSON |
-| `agents run [--once] [--concurrency N]` | run the loop in watch mode (default) or a single tick |
-| `agents status [--json]` | print the board |
-| `agents card <id> [--json]` | show one card |
-| `agents move <id> --to <column> [--note N]` | move a card between columns |
-| `agents logs <id>` | show a card's event log |
-| `agents retry <id>` | reopen a card for another worker attempt |
-| `agents unblock <id>` | reopen a blocked card and reset review cycles |
-| `agents install-skill [--project]` | install the Architect skill for Claude Code |
-
-## Architect skill (Claude Code)
-
-```bash
-agents install-skill            # -> ~/.claude/skills/agents-init and /agents-add
-```
-
-Then, in Claude Code inside a project:
-- **`/agents-init`** interviews you, scaffolds the board + brief, and points you at the runner.
-- **`/agents-add "<feature>"`** turns a feature into task cards on the board (turn-by-turn).
-
-The Architect never writes application code and never calls the model API — it plans, the
-local runner builds. Describing a feature in plain language also triggers `/agents-add`.
-
-## Optional verification
-
-The reviewer is the only quality gate by default. If you want a deterministic check before
-review, enable it in `.agents/config.json` (commands run by the trusted orchestrator, never
-the model):
-
-```json
-"verify": { "enabled": true, "commands": ["python -m pytest -q", "ruff check ."] }
-```
-
-## Role contracts
-
-- **Architect (Claude)** — interviews you, writes `project.md`, and **authors task cards** (turn-by-turn). Never edits code, never calls the model API.
-- **PM (DeepSeek)** — orchestrates the board: scheduling, dependencies, and merge/conflict resolution. Can also decompose raw `specs/` when `governance.decompose_specs` is enabled.
-- **Worker (DeepSeek)** — returns file contents for exactly one card; the trusted orchestrator writes files and commits to the task branch. No shell.
-- **Reviewer (DeepSeek)** — reads `git diff main...agent/<id>`; approves (merge + close) or requests changes.
-
-## State machine
-
-`not_started → in_progress → review → closed`, with `review → in_progress` on changes requested and any state → `blocked` when retries are exhausted. Merges are serialized and linear (`rebase` + `--ff-only`).
-
-## Isolation
-
-The CLI locates the nearest `.agents/` from the current directory and reads only that. Usage, logs, and cards are per project; the package keeps no cross-project state. Only credentials come from the environment.
-
-## Status
-
-**P1:** package, board model, CLI (`init/add/status/card/move`), project discovery.
-
-**P2:** PM decomposition, worker via git worktree, reviewer, full close loop, budget accounting, `agents run`.
-
-**P3:** PM-assisted merge-conflict resolution, per-card logs, optional `verify` commands, `retry`/`unblock`.
-
-**P4:** Claude Code Architect skills (`/agents-init`, `/agents-add`).
-
-**P5:** dogfood on a throwaway repo (real DeepSeek run).
-
-**P6 (current):** Architect authors cards directly (`agents add`, `agents plan`), PM orchestrates, `agents run` watches by default, `agents init` seeds `.env`.
+- **Cards never move** — is `agents run` actually running? Is `AI_ECONOMY_API_KEY` set in `.env`?
+- **A card is stuck in `blocked/`** — ask Claude: *"show me `agents logs T-004` and propose a fix, then unblock it."*
+- **`/agents-add` didn't trigger** — invoke it directly as `/agents-add <feature>`, or ask Claude to "add a task for …".
+- **Skills missing** — re-run `agents install-skill`.
 
 ## Development
 
