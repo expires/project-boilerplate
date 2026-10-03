@@ -88,6 +88,45 @@ def unmerged(root: Path) -> dict[str, str]:
     return conflicts
 
 
+def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    return git(root, "merge-base", "--is-ancestor", ancestor, descendant, check=False).returncode == 0
+
+
+def tracked_changes(root: Path) -> list[str]:
+    output = git(root, "status", "--porcelain", "--untracked-files=no", check=False).stdout
+    paths: list[str] = []
+    for line in output.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ")[-1]
+        paths.append(path.strip('"'))
+    return paths
+
+
+def stash_paths(root: Path, paths: list[str]) -> bool:
+    if not paths:
+        return False
+    return git(root, "stash", "push", "--", *paths, check=False).returncode == 0
+
+
+def stash_pop(root: Path) -> bool:
+    return git(root, "stash", "pop", check=False).returncode == 0
+
+
+def prepare_branch(root: Path, base: str, branch: str) -> bool:
+    if not branch_exists(root, branch) or is_ancestor(root, base, branch):
+        return True
+    git(root, "checkout", base, check=False)
+    rebase = git(root, "rebase", base, branch, check=False)
+    git(root, "checkout", base, check=False)
+    if rebase.returncode != 0:
+        git(root, "rebase", "--abort", check=False)
+        return False
+    return True
+
+
 def _abort(root: Path, base: str) -> None:
     git(root, "rebase", "--abort", check=False)
     git(root, "checkout", base, check=False)
@@ -99,32 +138,46 @@ def integrate(
     branch: str,
     resolver=None,
     max_rounds: int = 3,
-) -> bool:
-    rebase = git(root, "rebase", base, branch, check=False)
-    if rebase.returncode != 0:
-        for _ in range(max_rounds):
-            conflicts = unmerged(root)
-            if not conflicts or resolver is None:
-                _abort(root, base)
-                return False
-            resolved = resolver(conflicts)
-            if not resolved:
-                _abort(root, base)
-                return False
-            for relative, content in resolved.items():
-                target = root / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content)
-                git(root, "add", "--", relative)
-            cont = git(root, "rebase", "--continue", check=False, env={"GIT_EDITOR": "true"})
-            if cont.returncode == 0:
-                break
-        else:
-            _abort(root, base)
-            return False
-    git(root, "checkout", base, check=False)
-    merge = git(root, "merge", "--ff-only", branch, check=False)
-    return merge.returncode == 0
+) -> str:
+    dirty = tracked_changes(root)
+    others = [path for path in dirty if not path.startswith(AGENTS_DIRNAME + "/")]
+    if others:
+        return "dirty"
+    agents_dirty = [path for path in dirty if path.startswith(AGENTS_DIRNAME + "/")]
+    stashed = stash_paths(root, agents_dirty)
+    try:
+        git(root, "checkout", base, check=False)
+        if not is_ancestor(root, base, branch):
+            rebase = git(root, "rebase", base, branch, check=False)
+            if rebase.returncode != 0:
+                status = "conflict"
+                for _ in range(max_rounds):
+                    conflicts = unmerged(root)
+                    if not conflicts or resolver is None:
+                        status = "conflict"
+                        break
+                    resolved = resolver(conflicts)
+                    if not resolved:
+                        status = "conflict"
+                        break
+                    for relative, content in resolved.items():
+                        target = root / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(content)
+                        git(root, "add", "--", relative)
+                    cont = git(root, "rebase", "--continue", check=False, env={"GIT_EDITOR": "true"})
+                    if cont.returncode == 0:
+                        status = "ok"
+                        break
+                if status != "ok":
+                    _abort(root, base)
+                    return "conflict"
+            git(root, "checkout", base, check=False)
+        merge = git(root, "merge", "--ff-only", branch, check=False)
+        return "merged" if merge.returncode == 0 else "behind"
+    finally:
+        if stashed:
+            stash_pop(root)
 
 
 def delete_branch(root: Path, branch: str) -> None:

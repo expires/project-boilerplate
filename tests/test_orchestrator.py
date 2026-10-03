@@ -37,10 +37,12 @@ class FakeLLM:
         self.reviewer = reviewer
         self.roles = []
         self.users = []
+        self.kwargs = []
 
-    def __call__(self, config_dict, root, role, system, user):
+    def __call__(self, config_dict, root, role, system, user, **kwargs):
         self.roles.append(role)
         self.users.append((role, user))
+        self.kwargs.append((role, kwargs))
         if role == "pm":
             return self.pm(config_dict, root, user) if callable(self.pm) else self.pm
         if role == "worker":
@@ -238,31 +240,106 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(Board(self.root).cards(), [])
         self.assertTrue((self.root / ".agents" / "specs" / "failed" / "spec.md").is_file())
 
-    def test_conflict_resolution(self):
-        self.write_spec()
+    def test_integrate_resolves_conflict(self):
+        (self.root / "f.txt").write_text("base\n")
+        vcs.commit_all(self.root, "base")
+        vcs.git(self.root, "checkout", "-b", "feature")
+        (self.root / "f.txt").write_text("feature\n")
+        vcs.commit_all(self.root, "feature")
+        vcs.git(self.root, "checkout", "main")
+        (self.root / "f.txt").write_text("main\n")
+        vcs.commit_all(self.root, "main move")
+        result = vcs.integrate(self.root, "main", "feature", lambda conflicts: {"f.txt": "merged\n"})
+        self.assertEqual(result, "merged")
+        self.assertEqual((self.root / "f.txt").read_text(), "merged\n")
 
-        def pm(config_dict, root, user):
-            if "resolved file contents" in user:
-                return json.dumps({"files": [{"path": "hello.py", "content": "merged\n"}]})
-            return pm_response(
-                [
-                    one_task(key="1", title="First writer", files=["hello.py"]),
-                    one_task(key="2", title="Second writer", files=["hello.py"]),
-                ]
-            )
-
-        def worker(config_dict, root, user):
-            match = re.search(r"TASK (T-\d+)", user)
-            return json.dumps(
-                {"summary": "done", "files": [{"path": "hello.py", "content": f"{match.group(1)}\n"}]}
-            )
-
-        llm = FakeLLM(pm=pm, worker=worker, reviewer=approve_response())
-        self.orchestrator(llm).run(watch=False)
+    def test_overlap_exclusion(self):
         board = Board(self.root)
-        self.assertEqual(board.find("T-001").status, "closed")
-        self.assertEqual(board.find("T-002").status, "closed")
-        self.assertEqual((self.root / "hello.py").read_text(), "merged\n")
+        board.create("A", files_hint=["src/x.ts"])
+        board.create("B", files_hint=["src/x.ts"])
+        cfg = config.load_config(self.root)
+        cfg["governance"]["max_concurrency"] = 2
+        orch = Orchestrator(self.root, config=cfg, llm=FakeLLM())
+        self.assertEqual(orch._claim(), 1)
+        self.assertEqual(len(board.cards(("in_progress",))), 1)
+
+    def test_group_serializes_same_lane(self):
+        board = Board(self.root)
+        board.create("A", files_hint=["a.ts"], group="ui")
+        board.create("B", files_hint=["b.ts"], group="ui")
+        cfg = config.load_config(self.root)
+        cfg["governance"]["max_concurrency"] = 3
+        self.assertEqual(Orchestrator(self.root, config=cfg, llm=FakeLLM())._claim(), 1)
+
+    def test_different_groups_run_together(self):
+        board = Board(self.root)
+        board.create("A", files_hint=["a.ts"], group="ui")
+        board.create("B", files_hint=["b.ts"], group="api")
+        cfg = config.load_config(self.root)
+        cfg["governance"]["max_concurrency"] = 3
+        self.assertEqual(Orchestrator(self.root, config=cfg, llm=FakeLLM())._claim(), 2)
+
+    def test_route_is_default_lane(self):
+        board = Board(self.root)
+        board.create("A", files_hint=["a.ts"], route="frontend")
+        board.create("B", files_hint=["b.ts"], route="frontend")
+        cfg = config.load_config(self.root)
+        cfg["governance"]["max_concurrency"] = 3
+        self.assertEqual(Orchestrator(self.root, config=cfg, llm=FakeLLM())._claim(), 1)
+
+    def test_conflicts_with_blocks_co_scheduling(self):
+        board = Board(self.root)
+        board.create("A", files_hint=["a.ts"], group="ui")
+        child = board.create("B", files_hint=["b.ts"], group="api")
+        board.update(child.id, conflicts_with=["T-001"])
+        cfg = config.load_config(self.root)
+        cfg["governance"]["max_concurrency"] = 3
+        self.assertEqual(Orchestrator(self.root, config=cfg, llm=FakeLLM())._claim(), 1)
+
+    def test_shared_path_runs_exclusively(self):
+        board = Board(self.root)
+        board.create("A", files_hint=["package.json"], group="deps", priority=1)
+        board.create("B", files_hint=["b.ts"], group="ui", priority=2)
+        cfg = config.load_config(self.root)
+        cfg["governance"]["max_concurrency"] = 3
+        self.assertEqual(Orchestrator(self.root, config=cfg, llm=FakeLLM())._claim(), 1)
+
+    def test_plan_waves(self):
+        board = Board(self.root)
+        board.create("A", files_hint=["a.ts"], group="ui", priority=1)
+        board.create("B", files_hint=["b.ts"], group="api", priority=2)
+        board.create("C", files_hint=["c.ts"], group="ui", priority=3, depends_on=["T-001"])
+        cfg = config.load_config(self.root)
+        cfg["governance"]["max_concurrency"] = 3
+        waves = Orchestrator(self.root, config=cfg, llm=FakeLLM()).plan_waves()
+        self.assertEqual(waves, [["T-001", "T-002"], ["T-003"]])
+
+    def test_per_card_diff_override(self):
+        Board(self.root).create("Small cap", files_hint=["big.ts"], max_diff_lines=5)
+        big = "\n".join(f"line {i}" for i in range(20)) + "\n"
+        llm = FakeLLM(
+            pm="{}",
+            worker=json.dumps({"summary": "x", "files": [{"path": "big.ts", "content": big}]}),
+            reviewer=approve_response(),
+        )
+        self.orchestrator(llm, decompose=False).run(watch=False)
+        self.assertEqual(Board(self.root).find("T-001").status, "blocked")
+
+    def test_integrate_dirty_and_agents_stash(self):
+        (self.root / "f.txt").write_text("base\n")
+        vcs.commit_all(self.root, "base")
+        (self.root / "f.txt").write_text("changed\n")
+        self.assertEqual(vcs.integrate(self.root, "main", "main"), "dirty")
+        vcs.git(self.root, "checkout", "--", "f.txt")
+        vcs.git(self.root, "checkout", "-b", "feature2")
+        (self.root / "g.txt").write_text("g\n")
+        vcs.commit_all(self.root, "g")
+        vcs.git(self.root, "checkout", "main")
+        config_path = self.root / ".agents" / "config.json"
+        config_path.write_text("{}\n")
+        result = vcs.integrate(self.root, "main", "feature2")
+        self.assertEqual(result, "merged")
+        self.assertEqual(config_path.read_text(), "{}\n")
 
     def test_verify_failure_blocks(self):
         self.write_spec()

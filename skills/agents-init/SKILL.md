@@ -1,7 +1,7 @@
 ---
 name: agents-init
 description: Set up, start, and monitor the local agent board for a project (Architect). Use when the person starts a new project, says "new project", "init agents", "set up the board", "start the board", or asks "what's happening?", "status?", or "keep watching". You scaffold, start the detached runner, queue the first task, and report progress. You never write application code, never call the DeepSeek API, and never commit.
-allowed-tools: Bash(agents:*) Bash(agents unblock:*) Bash(agents retry:*) Bash(agents re-review:*) Bash(agents cancel:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(npm:*) Bash(pnpm:*) Bash(yarn:*) Read Edit Write
+allowed-tools: Bash(agents:*) Bash(git add:*) Bash(git commit:*) Bash(git merge:*) Bash(git rebase:*) Bash(git branch:*) Bash(git checkout:*) Bash(git stash:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(npm:*) Bash(pnpm:*) Bash(yarn:*) Read Edit Write
 ---
 
 # /agents-init — set up, run, and monitor
@@ -21,14 +21,16 @@ reviewer execute the board in `.agents/`. You plan and monitor; they build.
    (e.g. `styling.md` for the look-and-feel, `testing.md`, `errors.md`). These are injected
    into every worker and reviewer prompt that references them; list the always-on ones in
    `context.always_skills`. Keep each skill short and binding.
+   Parallelism defaults to one lane per `route` (same-route cards serialize) — `max_concurrency`
+   is the upper bound; the Architect can regroup cards per feature.
 4. Ensure `.env` exists, then **ask the person to paste `AI_ECONOMY_API_KEY`** into it and
    **wait for their reply**. Never echo the key.
-5. **The human commits — never you.** Stage nothing and run no `git commit`. Give them:
+5. **Commit the scaffold yourself** — you may run local git (add/commit/merge/rebase/branch/
+   checkout/stash); you must **never `git push`** (the human pushes).
    ```bash
    git add -A && git commit -m "chore: init agent board"
    ```
-   Then **wait**. Once they confirm (check with `git log --oneline -1`), continue. The runner
-   cannot create branches until at least one commit exists.
+   The runner needs at least one commit to branch from.
 6. Start the runner in the background: `agents run --detach`
 7. **Autoqueue the first feature** derived from the interview (e.g. "Scaffold Vite + React +
    TS + Tailwind app shell") with files, acceptance criteria, `depends_on`, and `priority`:
@@ -63,5 +65,6 @@ agents status --json
 ## Rules
 - Never write or edit application code; a worker does that through the board.
 - Never call the DeepSeek API directly; the runner owns all model I/O.
-- Never run `git commit` (the human commits) and never hand-edit `.agents/board/`.
+- You may commit and merge locally; **never `git push`** — the human pushes.
+- Never hand-edit `.agents/board/`; use the CLI.
 - Later feature requests are handled automatically by `/agents-add`.

@@ -26,6 +26,10 @@ class BoardError(Exception):
     pass
 
 
+class OversizeError(BoardError):
+    pass
+
+
 def log(message: str) -> None:
     print(f"[agents] {message}", file=sys.stderr)
 
@@ -78,6 +82,10 @@ class Card:
     files_hint: list[str] = field(default_factory=list)
     context_files: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
+    group: str = ""
+    conflicts_with: list[str] = field(default_factory=list)
+    max_diff_lines: int = 0
+    max_output_tokens: int = 0
     depth: int = 1
     attempts: int = 0
     review_cycles: int = 0
@@ -103,6 +111,10 @@ class Card:
         "files_hint",
         "context_files",
         "skills",
+        "group",
+        "conflicts_with",
+        "max_diff_lines",
+        "max_output_tokens",
         "depth",
         "attempts",
         "review_cycles",

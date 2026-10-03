@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .board import AGENTS_DIRNAME, BoardError, log
+from .board import AGENTS_DIRNAME, BoardError, OversizeError, log
 
 CALLS_THIS_RUN = 0
 
@@ -115,6 +115,7 @@ def call_llm(
     system_prompt: str,
     user_prompt: str,
     dry_run: bool = False,
+    max_output_tokens: int | None = None,
 ) -> str:
     global CALLS_THIS_RUN
     route_info = resolve_route(config, role)
@@ -137,13 +138,16 @@ def call_llm(
         user_prompt = user_prompt[: max(0, max_input - len(system_prompt))]
         log("input truncated to cost_controls.max_input_chars")
     check_budget(config, root)
+    max_tokens = min(
+        int(route.get("max_output_tokens", 4000)),
+        int(config.get("cost_controls", {}).get("max_output_tokens_per_call", 8192)),
+    )
+    if max_output_tokens:
+        max_tokens = int(max_output_tokens)
     payload = {
         "model": route_info["model"],
         "temperature": route.get("temperature", 0.2),
-        "max_tokens": min(
-            int(route.get("max_output_tokens", 4000)),
-            int(config.get("cost_controls", {}).get("max_output_tokens_per_call", 8000)),
-        ),
+        "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -163,7 +167,12 @@ def call_llm(
         raise BoardError(f"LLM HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise BoardError(f"LLM connection failed: {exc.reason}") from exc
-    text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+    choice = (body.get("choices") or [{}])[0]
+    if choice.get("finish_reason") == "length":
+        raise OversizeError(
+            "response truncated at max_output_tokens — split the card into smaller tasks or raise the cap"
+        )
+    text = choice.get("message", {}).get("content", "")
     if not text:
         raise BoardError("LLM returned empty content")
     CALLS_THIS_RUN += 1

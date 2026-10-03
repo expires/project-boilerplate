@@ -20,6 +20,7 @@ class CliTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         config.scaffold(self.root, project_name="demo")
         vcs.ensure_repo(self.root, "main")
+        vcs.commit_all(self.root, "chore: init")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -74,6 +75,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         card_id = json.loads(out)["created"][0]
         self.assertEqual(Board(self.root).find(card_id).skills, ["styling"])
+
+    def test_add_group_and_conflicts(self):
+        _, out, _ = self.run_cli("add", "Base")
+        base_id = out.strip()
+        _, out2, _ = self.run_cli("add", "Child", "--group", "ui", "--conflicts-with", base_id)
+        card = Board(self.root).find(out2.strip())
+        self.assertEqual(card.group, "ui")
+        self.assertEqual(card.conflicts_with, [base_id])
+
+    def test_plan_maps_conflicts_with(self):
+        payload = {
+            "tasks": [
+                {"key": "1", "title": "A", "files": ["a.ts"]},
+                {"key": "2", "title": "B", "files": ["b.ts"], "conflicts_with": ["1"]},
+            ]
+        }
+        code, out, _ = self.run_cli("plan", "--stdin", stdin=json.dumps(payload))
+        self.assertEqual(code, 0)
+        ids = json.loads(out)["created"]
+        self.assertEqual(Board(self.root).find(ids[1]).conflicts_with, [ids[0]])
+
+    def test_plan_check_creates_nothing(self):
+        payload = {"tasks": [{"key": "1", "title": "A", "files": ["a.ts"]}]}
+        code, out, _ = self.run_cli("plan", "--check", "--stdin", stdin=json.dumps(payload))
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(out)["valid"])
+        self.assertEqual(Board(self.root).cards(), [])
+
+    def test_schedule_outputs_waves(self):
+        self.run_cli("add", "A", "--file", "a.ts", "--group", "ui")
+        self.run_cli("add", "B", "--file", "b.ts", "--group", "api")
+        code, out, _ = self.run_cli("schedule")
+        self.assertEqual(code, 0)
+        self.assertIn("wave 1", out)
 
     def test_add_context_file(self):
         _, out, _ = self.run_cli("add", "Task", "--context-file", "src/api.ts")
@@ -153,6 +188,27 @@ class CliTests(unittest.TestCase):
         code, _, _ = self.run_cli("retry", card_id)
         self.assertEqual(code, 0)
         self.assertEqual(board.find(card_id).status, "not_started")
+
+    def test_retry_deletes_branch(self):
+        _, out, _ = self.run_cli("add", "Task")
+        card_id = out.strip()
+        board = Board(self.root)
+        vcs.git(self.root, "branch", "agent/t-001")
+        board.update(card_id, branch="agent/t-001")
+        board.move(card_id, "blocked")
+        code, _, _ = self.run_cli("retry", card_id)
+        self.assertEqual(code, 0)
+        self.assertEqual(board.find(card_id).branch, "")
+        self.assertFalse(vcs.branch_exists(self.root, "agent/t-001"))
+
+    def test_cancel_deletes_branch(self):
+        _, out, _ = self.run_cli("add", "Doomed")
+        card_id = out.strip()
+        vcs.git(self.root, "branch", "agent/t-001")
+        Board(self.root).update(card_id, branch="agent/t-001")
+        code, _, _ = self.run_cli("cancel", card_id)
+        self.assertEqual(code, 0)
+        self.assertFalse(vcs.branch_exists(self.root, "agent/t-001"))
 
     def test_re_review_with_branch(self):
         _, out, _ = self.run_cli("add", "Task")

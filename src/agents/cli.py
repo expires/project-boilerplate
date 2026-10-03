@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, roles, runner
+from . import __version__, roles, runner, vcs
 from .board import AGENTS_DIRNAME, COLUMNS, Board, BoardError, card_as_dict, find_project_root
 from .config import load_config, scaffold
 from .llm import load_dotenv, load_usage
@@ -70,7 +70,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     board = Board(root)
     body = _read_text(args.body_file).strip() if args.body_file else ""
     spec = body or args.text
-    for dep in args.depends_on or []:
+    for dep in [*(args.depends_on or []), *(args.conflicts_with or [])]:
         board.find(dep)
     validate_skills(root, list(args.skill or []))
     card = board.create(
@@ -82,6 +82,10 @@ def cmd_add(args: argparse.Namespace) -> int:
         files_hint=list(args.file or []),
         context_files=list(args.context_file or []),
         skills=list(args.skill or []),
+        group=args.group or "",
+        conflicts_with=list(args.conflicts_with or []),
+        max_diff_lines=args.max_diff_lines or 0,
+        max_output_tokens=args.max_output_tokens or 0,
         acceptance_criteria=list(args.criterion or []),
         depends_on=list(args.depends_on or []),
     )
@@ -103,9 +107,20 @@ def cmd_plan(args: argparse.Namespace) -> int:
     keys = {task["key"] for task in planned}
     for task in planned:
         validate_skills(root, task.get("skills", []))
-        for dep in task["depends_on"]:
-            if dep not in keys:
-                board.find(dep)
+        for ref in [*task["depends_on"], *task.get("conflicts_with", [])]:
+            if ref not in keys:
+                board.find(ref)
+    if getattr(args, "check", False):
+        group_by_route = bool(config.get("governance", {}).get("group_by_route", True))
+        warnings = []
+        for i, a in enumerate(planned):
+            for b in planned[i + 1 :]:
+                ga = a.get("group") or (a.get("route") if group_by_route else "")
+                gb = b.get("group") or (b.get("route") if group_by_route else "")
+                if set(a["files"]) & set(b["files"]) or (ga and ga == gb):
+                    warnings.append(f"{a['key']} and {b['key']} may not run together ({ga or 'files'})")
+        print(json.dumps({"valid": True, "tasks": [t["title"] for t in planned], "warnings": warnings}))
+        return 0
     id_by_key: dict[str, str] = {}
     for task in planned:
         card = board.create(
@@ -117,13 +132,22 @@ def cmd_plan(args: argparse.Namespace) -> int:
             files_hint=task["files"],
             context_files=task.get("context_files", []),
             skills=task.get("skills", []),
+            group=task.get("group", ""),
+            max_diff_lines=task.get("max_diff_lines", 0),
+            max_output_tokens=task.get("max_output_tokens", 0),
             acceptance_criteria=task["acceptance_criteria"],
         )
         id_by_key[task["key"]] = card.id
     for task in planned:
         deps = [id_by_key[dep] if dep in id_by_key else dep for dep in task["depends_on"]]
+        conflicts = [id_by_key[c] if c in id_by_key else c for c in task.get("conflicts_with", [])]
+        fields = {}
         if deps:
-            board.update(id_by_key[task["key"]], depends_on=deps)
+            fields["depends_on"] = deps
+        if conflicts:
+            fields["conflicts_with"] = conflicts
+        if fields:
+            board.update(id_by_key[task["key"]], **fields)
     print(json.dumps({"created": [id_by_key[task["key"]] for task in planned]}))
     return 0
 
@@ -214,9 +238,13 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
-    board = Board(_resolve_root(args))
-    board.update(args.card_id, attempts=0, blocking_issues=[], last_review_summary="")
-    card = board.move(args.card_id, "not_started", note="manually reopened for rework")
+    root = _resolve_root(args)
+    board = Board(root)
+    card = board.find(args.card_id)
+    if card.branch:
+        vcs.delete_branch(root, card.branch)
+    board.update(args.card_id, branch="", attempts=0, blocking_issues=[], last_review_summary="")
+    card = board.move(args.card_id, "not_started", note="manually reopened for rework (fresh branch)")
     print(f"{card.id} -> {card.status}")
     return 0
 
@@ -234,6 +262,20 @@ def cmd_unblock(args: argparse.Namespace) -> int:
 
 def cmd_re_review(args: argparse.Namespace) -> int:
     return cmd_unblock(args)
+
+
+def cmd_schedule(args: argparse.Namespace) -> int:
+    root = _resolve_root(args)
+    waves = Orchestrator(root, load_config(root)).plan_waves()
+    if args.json:
+        print(json.dumps({"waves": waves}))
+        return 0
+    if not waves:
+        print("nothing to schedule")
+        return 0
+    for index, wave in enumerate(waves, 1):
+        print(f"wave {index}: {', '.join(wave)}")
+    return 0
 
 
 def cmd_skills(args: argparse.Namespace) -> int:
@@ -256,6 +298,9 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     card = board.find(args.card_id)
     if args.reason:
         log_event(root, card.id, f"cancelled: {args.reason}")
+    if card.branch:
+        vcs.worktree_remove(root, root / AGENTS_DIRNAME / "worktrees" / card.id)
+        vcs.delete_branch(root, card.branch)
     board.delete(args.card_id)
     print(f"cancelled {card.id}")
     return 0
@@ -279,14 +324,23 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--skill", action="append", help="project skill to apply (repeatable)")
     add.add_argument("--criterion", action="append", help="acceptance criterion (repeatable)")
     add.add_argument("--depends-on", action="append", help="existing card id dependency (repeatable)")
+    add.add_argument("--conflicts-with", action="append", help="card id that must not run concurrently (repeatable)")
+    add.add_argument("--group", default="", help="lane; same-group cards never run concurrently")
     add.add_argument("--route", default="", help="routing label (default backend)")
     add.add_argument("--priority", type=int, help="lower runs first (default 100)")
+    add.add_argument("--max-diff-lines", type=int, help="per-card diff cap override")
+    add.add_argument("--max-output-tokens", type=int, help="per-card output token cap override")
     add.set_defaults(func=cmd_add)
 
     plan = sub.add_parser("plan", help="bulk-import task cards from JSON")
     plan.add_argument("--file", help="JSON file, or - to read stdin (stdin is the default)")
     plan.add_argument("--stdin", action="store_true", help="read JSON from stdin")
+    plan.add_argument("--check", action="store_true", help="validate and preview without creating cards")
     plan.set_defaults(func=cmd_plan)
+
+    schedule = sub.add_parser("schedule", help="preview the parallel waves for the current board")
+    schedule.add_argument("--json", action="store_true")
+    schedule.set_defaults(func=cmd_schedule)
 
     run = sub.add_parser("run", help="run the orchestrator loop (watch mode by default)")
     run.add_argument("--once", action="store_true", help="run a single tick and exit")

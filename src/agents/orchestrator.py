@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from . import roles, shell, vcs
-from .board import AGENTS_DIRNAME, Board, BoardError, Card, log
+from .board import AGENTS_DIRNAME, Board, BoardError, Card, OversizeError, log
 from .config import load_config
 from .llm import reset_call_counter
 from .logs import log_event
@@ -70,21 +70,114 @@ class Orchestrator:
             log(f"planned {len(tasks)} task(s) from {path.name}")
         return count
 
+    def _group_of(self, card: Card, group_by_route: bool) -> str:
+        return card.group or (card.route if group_by_route else "")
+
+    def _shared_paths(self) -> set[str]:
+        return set(self.config.get("context", {}).get("shared_paths", []))
+
+    def _conflicts(self, card: Card, in_flight: list[Card]) -> bool:
+        if set(card.conflicts_with) & {other.id for other in in_flight}:
+            return True
+        return any(card.id in other.conflicts_with for other in in_flight)
+
     def _claim(self) -> int:
         cap = int(self.config["governance"]["max_concurrency"])
         lease = int(self.config["governance"].get("lease_minutes", 45))
-        open_prs = sum(1 for card in self.board.cards() if card.status == "review")
-        slots = min(cap - len(self.board.cards(("in_progress",))), cap - open_prs)
-        claimed = 0
+        group_by_route = bool(self.config.get("governance", {}).get("group_by_route", True))
+        shared = self._shared_paths()
+        in_flight = self.board.cards(("in_progress", "review"))
+        running = sum(1 for card in in_flight if card.status == "in_progress")
+        slots = cap - running
         if slots <= 0:
             return 0
-        for card in self.board.claimable(self.board.closed_ids())[:slots]:
+        busy_files: set[str] = set()
+        busy_groups: set[str] = set()
+        busy_ids: set[str] = set()
+        exclusive = False
+        for card in in_flight:
+            busy_files.update(card.files_hint)
+            busy_ids.add(card.id)
+            group = self._group_of(card, group_by_route)
+            if group:
+                busy_groups.add(group)
+            if shared & set(card.files_hint):
+                exclusive = True
+        claimed = 0
+        claimed_cards: list[Card] = []
+        for card in self.board.claimable(self.board.closed_ids()):
+            if claimed >= slots or exclusive:
+                break
+            files = set(card.files_hint)
+            if busy_files & files:
+                continue
+            group = self._group_of(card, group_by_route)
+            if group and group in busy_groups:
+                continue
+            if self._conflicts(card, [*in_flight, *claimed_cards]):
+                continue
+            touches_shared = bool(shared & files)
+            if touches_shared and (in_flight or claimed):
+                continue
             self.board.claim(card.id, lease)
+            claimed_cards.append(card)
+            busy_files |= files
+            busy_ids.add(card.id)
+            if group:
+                busy_groups.add(group)
             claimed += 1
+            if touches_shared:
+                exclusive = True
         return claimed
 
+    def plan_waves(self) -> list[list[str]]:
+        cap = int(self.config["governance"]["max_concurrency"])
+        group_by_route = bool(self.config.get("governance", {}).get("group_by_route", True))
+        shared = self._shared_paths()
+        closed = set(self.board.closed_ids())
+        pending = sorted(self.board.cards(("not_started",)), key=lambda card: (int(card.priority), card.id))
+        waves: list[list[str]] = []
+        guard = 0
+        while pending and guard < 1000:
+            guard += 1
+            wave: list[Card] = []
+            busy_files: set[str] = set()
+            busy_groups: set[str] = set()
+            busy_ids: set[str] = set()
+            exclusive = False
+            remaining: list[Card] = []
+            for card in pending:
+                files = set(card.files_hint)
+                group = self._group_of(card, group_by_route)
+                if len(wave) >= cap or exclusive or not all(dep in closed for dep in card.depends_on):
+                    remaining.append(card)
+                    continue
+                if busy_files & files or (group and group in busy_groups):
+                    remaining.append(card)
+                    continue
+                if set(card.conflicts_with) & busy_ids or any(card.id in c.conflicts_with for c in wave):
+                    remaining.append(card)
+                    continue
+                touches_shared = bool(shared & files)
+                if touches_shared and wave:
+                    remaining.append(card)
+                    continue
+                wave.append(card)
+                busy_files |= files
+                busy_ids.add(card.id)
+                if group:
+                    busy_groups.add(group)
+                if touches_shared:
+                    exclusive = True
+            if not wave:
+                break
+            waves.append([card.id for card in wave])
+            closed.update(card.id for card in wave)
+            pending = remaining
+        return waves
+
     def _context(self, card: Card, worktree: Path) -> str:
-        limit = int(self.config.get("cost_controls", {}).get("max_input_chars", 48000)) // 2
+        limit = int(self.config.get("cost_controls", {}).get("max_input_chars", 120000)) * 2 // 3
         chunks: list[str] = []
         seen: set[str] = set()
         for rel in [*card.files_hint, *card.context_files]:
@@ -116,13 +209,12 @@ class Orchestrator:
         parts.extend(f"- {item}" for item in card.blocking_issues)
         return "\n".join(parts).strip()
 
-    def _validate_writes(self, card: Card, items: Any, worktree: Path) -> list[tuple[Path, str]]:
+    def _validate_writes(self, card: Card, items: Any, worktree: Path, max_diff: int) -> list[tuple[Path, str]]:
         if not isinstance(items, list) or not items:
             raise BoardError("worker response contained no files")
-        max_files = int(self.config["context"].get("max_files_per_task", 8)) + 2
+        max_files = int(self.config["context"].get("max_files_per_task", 16)) + 2
         if len(items) > max_files:
-            raise BoardError(f"worker produced {len(items)} files; cap is {max_files}")
-        max_diff = int(self.config.get("cost_controls", {}).get("max_diff_lines", 600))
+            raise OversizeError(f"worker produced {len(items)} files; cap is {max_files}")
         writes: list[tuple[Path, str]] = []
         total = 0
         for item in items:
@@ -138,7 +230,9 @@ class Orchestrator:
             total += changed_line_count(before, item["content"])
             writes.append((target, item["content"]))
         if total > max_diff:
-            raise BoardError(f"worker diff is {total} lines; cap is {max_diff}")
+            raise OversizeError(
+                f"worker diff is {total} lines; cap is {max_diff} — split the card or raise cost_controls.max_diff_lines"
+            )
         if total == 0:
             raise BoardError("worker produced no changes")
         return writes
@@ -177,7 +271,10 @@ class Orchestrator:
         worktree = self.agents / "worktrees" / card.id
         branch = card.branch or f"{self.branch_prefix}{card.id.lower()}"
         vcs.worktree_remove(self.root, worktree)
+        max_diff = card.max_diff_lines or int(self.config.get("cost_controls", {}).get("max_diff_lines", 1500))
         try:
+            if card.branch and not vcs.prepare_branch(self.root, self.base, branch):
+                raise BoardError(f"branch {branch} is behind {self.base} and could not be rebased")
             log_event(self.root, card.id, f"worker started on {branch}")
             vcs.worktree_add(self.root, worktree, branch, self.base)
             context = self._context(card, worktree)
@@ -187,7 +284,7 @@ class Orchestrator:
             payload = roles.worker_propose(
                 self.config, self.root, card, context, self._feedback(card), skills_text, self.llm
             )
-            writes = self._validate_writes(card, payload.get("files"), worktree)
+            writes = self._validate_writes(card, payload.get("files"), worktree, max_diff)
             for target, content in writes:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content)
@@ -199,6 +296,12 @@ class Orchestrator:
             self.board.move(card.id, "review", note="worker produced changes")
             log_event(self.root, card.id, f"committed {len(writes)} file(s) to {branch}")
             log(f"{card.id}: {len(writes)} file(s) committed to {branch}")
+            return 1
+        except OversizeError as exc:
+            log(f"{card.id} blocked (oversize): {exc}")
+            log_event(self.root, card.id, f"blocked (oversize): {exc}")
+            self.board.update(card.id, attempts=int(card.attempts) + 1)
+            self.board.move(card.id, "blocked", note=f"oversize: {exc}")
             return 1
         except BoardError as exc:
             log(f"{card.id} failed: {exc}")
@@ -234,15 +337,20 @@ class Orchestrator:
         log_event(self.root, card.id, f"review verdict: {verdict['verdict']} ({verdict['summary']})")
         if verdict["verdict"] == "approve":
             resolver = self._resolver(card, self.base, card.branch)
-            if vcs.integrate(self.root, self.base, card.branch, resolver):
+            result = vcs.integrate(self.root, self.base, card.branch, resolver)
+            if result == "merged":
                 self.board.move(card.id, "closed", note="review approved and merged")
                 vcs.delete_branch(self.root, card.branch)
                 log_event(self.root, card.id, f"merged into {self.base}")
                 log(f"{card.id}: approved and merged")
-            else:
-                self.board.move(card.id, "blocked", note="merge conflict; needs resolution")
-                log_event(self.root, card.id, "merge conflict unresolved")
-                log(f"{card.id}: merge conflict")
+                return 1
+            if result in ("dirty", "behind"):
+                log_event(self.root, card.id, f"merge deferred ({result}); will retry")
+                log(f"{card.id}: merge deferred ({result})")
+                return 0
+            self.board.move(card.id, "blocked", note="merge conflict; needs resolution")
+            log_event(self.root, card.id, "merge conflict unresolved")
+            log(f"{card.id}: merge conflict")
             return 1
         cycles = int(card.review_cycles) + 1
         self.board.update(

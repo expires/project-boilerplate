@@ -111,7 +111,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "model_env": "WORKER_MODEL",
             "model_default": "deepseek-coder",
             "temperature": 0.1,
-            "max_output_tokens": 8000,
+            "max_output_tokens": 8192,
             "timeout_seconds": 300,
         },
         "reviewer": {
@@ -124,7 +124,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "routes": ["backend", "frontend", "infra", "test", "docs"],
     "governance": {
-        "max_concurrency": 2,
+        "max_concurrency": 3,
+        "group_by_route": True,
         "max_depth": 1,
         "review_retries": 3,
         "max_task_attempts": 2,
@@ -137,13 +138,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "monthly_budget_usd": 25.0,
         "halt_on_budget_exceeded": True,
         "max_llm_calls_per_tick": 60,
-        "max_output_tokens_per_call": 8000,
-        "max_input_chars": 48000,
-        "max_diff_lines": 600,
+        "max_output_tokens_per_call": 8192,
+        "max_input_chars": 120000,
+        "max_diff_lines": 1500,
     },
     "context": {
-        "max_files_per_task": 8,
+        "max_files_per_task": 16,
         "always_skills": [],
+        "shared_paths": [
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "bun.lockb",
+            "package.json",
+            "pyproject.toml",
+            "Cargo.toml",
+            "composer.json",
+            "Gemfile",
+        ],
         "protected_paths": [
             f"{AGENTS_DIRNAME}/**",
             ".git/**",
@@ -170,6 +182,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_branch": "main",
         "branch_prefix": "agent/",
         "commit_prefix": "feat(agent)",
+        "conflict_strategy": "serialize",
     },
     "pricing": {
         "economy": {

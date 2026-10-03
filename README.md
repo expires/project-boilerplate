@@ -34,11 +34,11 @@ You talk to Claude Code; it does the setup, starts the runner, queues the work, 
 
 3. **Claude asks you to paste `AI_ECONOMY_API_KEY`** into `.env` and waits. It never prints the key.
 
-4. **Claude asks you to make the first commit** (it never commits for you):
+4. **Claude commits the scaffold** (it may run local git, but never pushes):
    ```bash
    git add -A && git commit -m "chore: init agent board"
    ```
-   It waits until the commit exists, then continues.
+   You push to the remote whenever you're ready.
 
 5. **Claude starts the runner detached** (`agents run --detach`) and **auto-queues the first
    feature** it derived from the interview.
@@ -53,8 +53,8 @@ You talk to Claude Code; it does the setup, starts the runner, queues the work, 
 |---|---|
 | Interview you, write the brief, scaffold the board | Write or edit application code |
 | Create/update task cards, start the runner, monitor | Call the DeepSeek API |
-| Read board state and explain failures | Commit for you — **you always commit** |
-| Reset/reopen blocked cards for you | Hand-edit `.agents/board/` or touch GitHub |
+| Read board state and explain failures | Hand-edit `.agents/board/` |
+| Commit and merge locally (`git add/commit/merge/rebase/branch/checkout/stash`) | **`git push` — the human pushes** |
 
 ## The runner
 
@@ -112,11 +112,45 @@ Example — `.agents/skills/styling.md`:
 Writing the skill file first is part of planning: if a convention matters, capture it as a
 skill so every future worker (and the reviewer checking them) follows it.
 
+## Local vs push
+
+Everything is local. The runner commits each card to its own branch and merges approved work
+into your base branch; Claude and subagents may also commit/merge locally. **Only `git push`
+is yours** — nothing in this tool ever touches the network. (Recommend denying `Bash(git push:*)`
+in your Claude Code settings.)
+
+Merges are conflict-free by construction: **`governance.max_concurrency: 1`** runs one card at
+a time and merges it before the next is claimed, so every branch is cut from current `main` and
+integration is a fast-forward. Raise the concurrency and cards whose files overlap are serialized.
+
+## Ticket size & context
+
+A single card is bounded by the worker's **output** tokens (the worker emits whole file contents
+in one reply), not by context. The caps are generous by default and per-card tunable:
+
+- `cost_controls.max_input_chars: 120000`, `context.max_files_per_task: 16`, `cost_controls.max_diff_lines: 1500`.
+- Per card: `agents add "<title>" --max-diff-lines N --max-output-tokens N` (or the same fields in `agents plan` JSON).
+- If a card is genuinely too big, the runner blocks it immediately with a clear message — split it.
+
+## Parallel work
+
+You (via the Architect) decide what may run together; the runner enforces it safely.
+
+- Cards default to a **lane per `route`** (`governance.group_by_route`): same-route cards
+  serialize, different routes can run concurrently.
+- Override a card's lane with `group` (`agents add … --group ui`), and mark cards that share
+  files that are not in `files_hint` with `conflicts_with`.
+- Any card touching a `context.shared_paths` entry (lockfiles, `package.json`, …) runs **exclusively**.
+- `governance.max_concurrency` is the **upper bound** on simultaneous cards.
+- Preview the schedule: **`agents schedule`** (or `agents plan --check` before creating cards).
+  Merges stay serialized and fast-forward.
+
 ## Configuration
 
 `.agents/config.json` — Claude sets the important parts during `/agents-init`:
 
-- `vcs.base_branch` — where approved work merges (default `main`).
+- `vcs.base_branch` — where approved work merges (default `main`); `vcs.conflict_strategy: "serialize"`.
+- `governance.max_concurrency` — 1 by default (serialized, conflict-free).
 - `context.protected_paths` — files agents may never write (defaults cover `.agents/**`, `.git/**`, `.env*`, secrets).
 - `verify` — optional deterministic commands the runner executes before review (off by default).
 - `governance.decompose_specs` — off by default: Claude authors cards directly. Turn on to let the DeepSeek PM decompose raw specs in `.agents/specs/`.

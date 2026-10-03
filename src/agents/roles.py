@@ -9,11 +9,18 @@ from .board import BoardError, Card
 from .llm import call_llm, extract_json, sanitize
 from .validate import is_protected
 
-LLM = Callable[[dict[str, Any], Path, str, str, str], str]
+LLM = Callable[..., str]
 
 
-def default_llm(config: dict[str, Any], root: Path, role: str, system: str, user: str) -> str:
-    return call_llm(config, root, role, system, user)
+def default_llm(
+    config: dict[str, Any],
+    root: Path,
+    role: str,
+    system: str,
+    user: str,
+    max_output_tokens: int | None = None,
+) -> str:
+    return call_llm(config, root, role, system, user, max_output_tokens=max_output_tokens)
 
 
 def _fill(template: str, **values: str) -> str:
@@ -51,11 +58,15 @@ def validate_planned_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str,
         depends = [str(d) for d in (item.get("depends_on") or []) if str(d).strip()]
         context_files = [str(p) for p in (item.get("context_files") or []) if str(p).strip()]
         skills = [str(s) for s in (item.get("skills") or []) if str(s).strip()]
+        group = str(item.get("group") or "").strip()
+        conflicts = [str(c) for c in (item.get("conflicts_with") or []) if str(c).strip()]
         spec = str(item.get("spec") or item.get("body") or "").strip() or title
         try:
             priority = int(item.get("priority", 100))
+            max_diff = int(item.get("max_diff_lines", 0) or 0)
+            max_tokens = int(item.get("max_output_tokens", 0) or 0)
         except (TypeError, ValueError):
-            raise BoardError(f"task '{key}' has a non-numeric priority") from None
+            raise BoardError(f"task '{key}' has a non-numeric numeric field") from None
         normalized.append(
             {
                 "key": key,
@@ -64,9 +75,13 @@ def validate_planned_tasks(config: dict[str, Any], tasks: Any) -> list[dict[str,
                 "files": files,
                 "context_files": context_files,
                 "skills": skills,
+                "group": group,
+                "conflicts_with": conflicts,
                 "acceptance_criteria": criteria,
                 "depends_on": depends,
                 "priority": priority,
+                "max_diff_lines": max_diff,
+                "max_output_tokens": max_tokens,
                 "spec": spec,
             }
         )
@@ -145,7 +160,9 @@ def worker_propose(
         SKILLS=skills or "(none)",
         FEEDBACK=feedback or "(none)",
     )
-    raw = (llm or default_llm)(config, root, "worker", prompts.WORKER_SYSTEM, user)
+    raw = (llm or default_llm)(
+        config, root, "worker", prompts.WORKER_SYSTEM, user, max_output_tokens=card.max_output_tokens or None
+    )
     payload = extract_json(raw)
     if not isinstance(payload, dict) or not isinstance(payload.get("files"), list) or not payload["files"]:
         raise BoardError("worker response must contain a non-empty 'files' list")

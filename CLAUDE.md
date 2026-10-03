@@ -27,6 +27,7 @@ You (human)
 4. **One provider.** DeepSeek via `economy`. Do not add Anthropic/OpenAI/other providers.
 5. **Protected paths.** `.agents/**`, `.git/**`, `.env*`, secrets, and key material are never writable by agents.
 6. **Stdlib only at runtime.** No third-party dependencies.
+7. **Local git yes, push no.** The Architect and subagents may `git add/commit/merge/rebase/branch/checkout/stash`. Only the human runs `git push`; the runner never touches the network.
 
 ## Layout
 
