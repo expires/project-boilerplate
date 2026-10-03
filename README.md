@@ -65,10 +65,26 @@ Claude starts it for you; these are the underlying commands.
 | `agents run --detach` | Start in the background (pidfile + `.agents/runner.log`). |
 | `agents run` | Run in watch mode in the foreground. `Ctrl-C` to stop. |
 | `agents run --once` | A single pass, then exit. |
-| `agents stop` | Stop the detached runner. |
-| `agents status` | Board columns, runner state, and budget spend. |
+| `agents stop` | Stop the detached runner and the UI. |
+| `agents ui [--detach\|--stop]` | Serve/stop the local Kanban board. |
+| `agents status` | Board columns, runner + UI state, and budget spend. |
 
 The runner reads `AI_ECONOMY_API_KEY` from `.env`. It is the only thing that calls DeepSeek.
+
+## Board UI (local Kanban)
+
+`agents init` starts a read-only localhost Kanban in the background (skip it with `--no-ui`).
+Open the printed URL to watch cards move through the columns live; click a card for its log.
+
+```bash
+agents ui              # serve in the foreground (prints http://127.0.0.1:8765)
+agents ui --detach     # background it (pidfile + .agents/ui.log)
+agents ui --stop       # stop it
+agents status          # shows the UI URL
+```
+
+It's stdlib-only, binds `127.0.0.1`, has no write endpoints, and polls the board every second.
+`agents stop` stops both the runner and the UI. Config lives under `"ui"` in `.agents/config.json`.
 
 ## The board
 

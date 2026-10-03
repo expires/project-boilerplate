@@ -13,6 +13,9 @@ GITIGNORE_BLOCK = """# --- agent-board runtime state (board cards are committed;
 .agents/usage.json
 .agents/runner.log
 .agents/runner.pid
+.agents/ui.log
+.agents/ui.pid
+.agents/ui.json
 .agents/board/.lock
 .agents/board/**/.tmp-*
 """
@@ -183,6 +186,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "branch_prefix": "agent/",
         "commit_prefix": "feat(agent)",
         "conflict_strategy": "serialize",
+    },
+    "ui": {
+        "enabled": True,
+        "autostart": True,
+        "host": "127.0.0.1",
+        "port": 8765,
     },
     "pricing": {
         "economy": {

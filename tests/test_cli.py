@@ -103,6 +103,11 @@ class CliTests(unittest.TestCase):
         self.assertTrue(json.loads(out)["valid"])
         self.assertEqual(Board(self.root).cards(), [])
 
+    def test_init_no_ui(self):
+        code, _, _ = self.run_cli("init", "--no-ui", "--name", "demo")
+        self.assertEqual(code, 0)
+        self.assertFalse((self.root / ".agents" / "ui.json").exists())
+
     def test_schedule_outputs_waves(self):
         self.run_cli("add", "A", "--file", "a.ts", "--group", "ui")
         self.run_cli("add", "B", "--file", "b.ts", "--group", "api")
@@ -232,7 +237,7 @@ class CliTests(unittest.TestCase):
         code, out, _ = self.run_cli("status", "--json")
         self.assertEqual(code, 0)
         data = json.loads(out)
-        self.assertEqual(set(data), {"cards", "runner", "budget"})
+        self.assertEqual(set(data), {"cards", "runner", "ui", "budget"})
         self.assertFalse(data["runner"]["running"])
 
     def test_install_skill_writes_both(self):

@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, roles, runner, vcs
+from . import __version__, roles, runner, ui, vcs
 from .board import AGENTS_DIRNAME, COLUMNS, Board, BoardError, card_as_dict, find_project_root
 from .config import load_config, scaffold
 from .llm import load_dotenv, load_usage
@@ -56,6 +56,29 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"  - edit {root / AGENTS_DIRNAME / 'config.json'}")
     print("  - add work: agents add \"<task title>\"")
     print("  - run it:   agents run")
+    config = load_config(root)
+    ui_cfg = config.get("ui", {})
+    if not args.no_ui and ui_cfg.get("enabled", True) and ui_cfg.get("autostart", True):
+        url = ui.start_detached(root, ui_cfg.get("host", "127.0.0.1"), int(ui_cfg.get("port", 8765)))
+        if url:
+            print(f"  - board ui: {url}")
+    return 0
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    root = _resolve_root(args)
+    config = load_config(root)
+    ui_cfg = config.get("ui", {})
+    host = args.host or ui_cfg.get("host", "127.0.0.1")
+    port = args.port or int(ui_cfg.get("port", 8765))
+    if args.stop:
+        stopped = ui.stop(root)
+        print("ui stopped" if stopped else "no active ui")
+        return 0
+    if args.detach:
+        print(f"ui: {ui.start_detached(root, host, port)}")
+        return 0
+    ui.serve(root, host, port)
     return 0
 
 
@@ -168,6 +191,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.detach:
         pid = runner.start_detached(root, concurrency=args.concurrency)
         print(f"runner started (pid {pid}); log: {runner.runner_state(root)['log']}")
+        ui_cfg = load_config(root).get("ui", {})
+        if ui_cfg.get("enabled", True) and not ui.is_running(root):
+            url = ui.start_detached(root, ui_cfg.get("host", "127.0.0.1"), int(ui_cfg.get("port", 8765)))
+            if url:
+                print(f"ui: {url}")
         return 0
     config = load_config(root)
     if args.concurrency:
@@ -182,6 +210,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
     root = _resolve_root(args)
     stopped = runner.stop(root)
     print("runner stopped" if stopped else "no active runner")
+    if ui.stop(root):
+        print("ui stopped")
     return 0
 
 
@@ -199,7 +229,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     board = Board(root)
     cards = board.cards()
     if args.json:
-        payload = {"cards": [card_as_dict(card) for card in cards], "runner": runner.runner_state(root), "budget": _budget(root)}
+        payload = {
+            "cards": [card_as_dict(card) for card in cards],
+            "runner": runner.runner_state(root),
+            "ui": ui.ui_state(root),
+            "budget": _budget(root),
+        }
         print(json.dumps(payload, indent=2))
         return 0
     for column in COLUMNS:
@@ -210,7 +245,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     state = runner.runner_state(root)
     label = f"running (pid {state['pid']})" if state["running"] else "stopped"
     budget = _budget(root)
+    ui_state = ui.ui_state(root)
+    ui_label = f"running ({ui_state['url']})" if ui_state["running"] else "stopped"
     print(f"\nrunner: {label}")
+    print(f"ui: {ui_label}")
     print(f"budget: ${budget['spent_usd']:.4f} / ${budget['monthly_usd']}")
     return 0
 
@@ -314,6 +352,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="scaffold .agents/ in the current directory")
     init.add_argument("--name", help="project name for the brief header")
+    init.add_argument("--no-ui", action="store_true", help="do not start the local board UI")
     init.set_defaults(func=cmd_init)
 
     add = sub.add_parser("add", help="create one task card on the board")
@@ -348,8 +387,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--concurrency", type=int, help="override governance.max_concurrency")
     run.set_defaults(func=cmd_run)
 
-    stop = sub.add_parser("stop", help="stop a detached runner")
+    stop = sub.add_parser("stop", help="stop the runner and the UI")
     stop.set_defaults(func=cmd_stop)
+
+    ui_parser = sub.add_parser("ui", help="serve the local kanban board")
+    ui_parser.add_argument("--host")
+    ui_parser.add_argument("--port", type=int)
+    ui_parser.add_argument("--detach", action="store_true", help="run in the background")
+    ui_parser.add_argument("--stop", action="store_true", help="stop the background UI")
+    ui_parser.set_defaults(func=cmd_ui)
 
     status = sub.add_parser("status", help="show the board")
     status.add_argument("--json", action="store_true")
